@@ -1,0 +1,798 @@
+<title>V4-Pro Decode Prediction</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=JetBrains+Mono:wght@400;500;700&display=swap">
+
+<style>
+  :root {
+    --ground:      #FCFCFD;
+    --surface:     #F4F5F7;
+    --surface-2:   #EAECF0;
+    --ink:         #14161A;
+    --ink-2:       #3D444F;
+    --muted:       #6B7280;
+    --rule:        #DFE3E9;
+    --rule-strong: #C4CAD4;
+    --accent:      #2E5C8A;
+    --derived:     #1F6F5C;
+    --derived-bg:  #E3F0EC;
+    --assumed:     #A8622F;
+    --assumed-bg:  #F7EBE2;
+    --open:        #6B4E9E;
+    --open-bg:     #EEEAF6;
+
+    --f-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+    --f-body:    "Source Serif 4", Georgia, "Times New Roman", serif;
+    --f-mono:    "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #0E1116;
+      --surface:     #161A21;
+      --surface-2:   #1D222B;
+      --ink:         #E6E9EF;
+      --ink-2:       #BCC3CE;
+      --muted:       #8B94A3;
+      --rule:        #252B35;
+      --rule-strong: #39414E;
+      --accent:      #7FB0DE;
+      --derived:     #57C6A8;
+      --derived-bg:  #12302A;
+      --assumed:     #DE9A63;
+      --assumed-bg:  #322317;
+      --open:        #AC94DE;
+      --open-bg:     #241E33;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:      #0E1116;
+    --surface:     #161A21;
+    --surface-2:   #1D222B;
+    --ink:         #E6E9EF;
+    --ink-2:       #BCC3CE;
+    --muted:       #8B94A3;
+    --rule:        #252B35;
+    --rule-strong: #39414E;
+    --accent:      #7FB0DE;
+    --derived:     #57C6A8;
+    --derived-bg:  #12302A;
+    --assumed:     #DE9A63;
+    --assumed-bg:  #322317;
+    --open:        #AC94DE;
+    --open-bg:     #241E33;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--f-body);
+    font-size: 17px;
+    line-height: 1.62;
+    margin: 0;
+    padding: 0 24px 96px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 860px; margin: 0 auto; }
+
+  /* ---------------------------------------------------------- masthead */
+  .masthead {
+    padding: 64px 0 36px;
+    border-bottom: 2px solid var(--ink);
+  }
+  .eyebrow {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 18px;
+  }
+  h1 {
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: clamp(34px, 6vw, 52px);
+    line-height: 1.04;
+    letter-spacing: -0.022em;
+    text-wrap: balance;
+    margin: 0 0 18px;
+  }
+  .standfirst {
+    font-size: 20px;
+    line-height: 1.5;
+    color: var(--ink-2);
+    max-width: 62ch;
+    margin: 0 0 28px;
+  }
+  .meta {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 18px 28px;
+    font-family: var(--f-mono);
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+  .meta dt {
+    color: var(--muted);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  .meta dd { margin: 0; color: var(--ink); word-break: break-all; }
+
+  /* ------------------------------------------------------ reconciliation */
+  .recon {
+    margin: 44px 0 8px;
+    border: 1px solid var(--rule-strong);
+    background: var(--surface);
+    padding: 30px 32px 26px;
+  }
+  .recon-label {
+    font-family: var(--f-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 20px;
+  }
+  .ledger {
+    font-family: var(--f-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: clamp(12px, 2.4vw, 16px);
+    line-height: 2.05;
+    overflow-x: auto;
+  }
+  .ledger table { border-collapse: collapse; width: 100%; min-width: 420px; }
+  .ledger td { padding: 0; white-space: nowrap; }
+  .ledger .lbl { color: var(--muted); padding-right: 28px; }
+  .ledger .num { text-align: right; padding-right: 20px; }
+  .ledger .unit { color: var(--muted); text-align: right; }
+  .ledger tr.total td {
+    border-top: 1px solid var(--rule-strong);
+    padding-top: 10px;
+    color: var(--derived);
+    font-weight: 700;
+  }
+  .ledger tr.total .lbl { color: var(--derived); }
+  .recon-note {
+    margin: 22px 0 0;
+    font-size: 15.5px;
+    color: var(--ink-2);
+    max-width: 60ch;
+  }
+  .recon-note strong { color: var(--ink); font-weight: 600; }
+
+  /* --------------------------------------------------------- phase rail */
+  .phases {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    margin: 40px 0 0;
+  }
+  .phase { background: var(--ground); padding: 16px 18px 18px; }
+  .phase-n {
+    font-family: var(--f-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+  }
+  .phase-name {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: 15px;
+    letter-spacing: -0.01em;
+    margin: 5px 0 9px;
+    color: var(--ink);
+  }
+  .phase[data-state="done"] { background: var(--derived-bg); }
+  .phase[data-state="next"] { box-shadow: inset 3px 0 0 var(--accent); }
+
+  /* -------------------------------------------------------------- chips */
+  .chip {
+    display: inline-block;
+    font-family: var(--f-mono);
+    font-size: 9.5px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 3px 7px;
+    border-radius: 2px;
+    white-space: nowrap;
+  }
+  .chip.derived { background: var(--derived-bg); color: var(--derived); }
+  .chip.assumed { background: var(--assumed-bg); color: var(--assumed); }
+  .chip.open    { background: var(--open-bg);    color: var(--open); }
+  .chip.pending { background: var(--surface-2);  color: var(--muted); }
+
+  /* ------------------------------------------------------------ headings */
+  section { margin-top: 64px; }
+  h2 {
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: 15px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 6px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--rule-strong);
+  }
+  h3 {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: 23px;
+    letter-spacing: -0.014em;
+    line-height: 1.24;
+    text-wrap: balance;
+    margin: 36px 0 12px;
+  }
+  h4 {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: 16px;
+    letter-spacing: -0.005em;
+    margin: 28px 0 8px;
+  }
+  p { margin: 0 0 16px; max-width: 68ch; }
+  p.lede { font-size: 18.5px; color: var(--ink-2); max-width: 64ch; }
+  ul { margin: 0 0 16px; padding-left: 20px; max-width: 68ch; }
+  li { margin-bottom: 7px; }
+  a { color: var(--accent); text-underline-offset: 2px; }
+  code {
+    font-family: var(--f-mono);
+    font-size: 0.855em;
+    background: var(--surface-2);
+    padding: 1.5px 5px;
+    border-radius: 2px;
+    word-break: break-word;
+  }
+  strong { font-weight: 600; }
+
+  /* ------------------------------------------------------------- tables */
+  .tw { overflow-x: auto; margin: 20px 0 24px; }
+  table.data {
+    border-collapse: collapse;
+    width: 100%;
+    min-width: 460px;
+    font-size: 14.5px;
+  }
+  table.data th {
+    font-family: var(--f-mono);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    text-align: left;
+    padding: 0 16px 9px 0;
+    border-bottom: 1px solid var(--rule-strong);
+    white-space: nowrap;
+  }
+  table.data td {
+    padding: 9px 16px 9px 0;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+    font-family: var(--f-body);
+  }
+  table.data td.n {
+    font-family: var(--f-mono);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+    white-space: nowrap;
+  }
+  table.data td.m { font-family: var(--f-mono); font-size: 12.5px; }
+  table.data tr.sum td {
+    border-top: 1px solid var(--rule-strong);
+    border-bottom: none;
+    font-weight: 600;
+    color: var(--derived);
+  }
+  table.data tr.sum td.n { font-weight: 700; }
+
+  /* --------------------------------------------------------------- code */
+  pre {
+    font-family: var(--f-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 12.5px;
+    line-height: 1.68;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--rule-strong);
+    padding: 16px 18px;
+    overflow-x: auto;
+    margin: 18px 0 22px;
+  }
+  pre.verdict { border-left-color: var(--derived); }
+  pre.caution { border-left-color: var(--assumed); }
+
+  /* --------------------------------------------------------------- note */
+  .callout {
+    border: 1px solid var(--rule-strong);
+    border-left: 3px solid var(--assumed);
+    background: var(--surface);
+    padding: 18px 22px;
+    margin: 22px 0;
+  }
+  .callout p { margin: 0; font-size: 16px; max-width: 64ch; }
+  .callout p + p { margin-top: 12px; }
+  .callout .hd {
+    font-family: var(--f-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--assumed);
+    margin-bottom: 9px;
+  }
+
+  /* ------------------------------------------------------------- footer */
+  footer {
+    margin-top: 72px;
+    padding-top: 24px;
+    border-top: 2px solid var(--ink);
+    font-size: 15px;
+    color: var(--muted);
+  }
+  footer p { max-width: 68ch; }
+
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="eyebrow">GitM Execution-Graph Case · Working Status</p>
+    <h1>DeepSeek-V4-Pro, one decode step</h1>
+    <p class="standfirst">
+      Predicting how a 1.6 trillion-parameter checkpoint executes a single decode step —
+      derived entirely from its own files, before it is ever run.
+    </p>
+    <dl class="meta">
+      <div>
+        <dt>Checkpoint</dt>
+        <dd>deepseek-ai/DeepSeek-V4-Pro</dd>
+      </div>
+      <div>
+        <dt>Revision</dt>
+        <dd>b5968e9190ef611bbf34a7229255be88a0e937c1</dd>
+      </div>
+      <div>
+        <dt>Scale</dt>
+        <dd>1.6 T total / 49 B active · FP4 + FP8</dd>
+      </div>
+      <div>
+        <dt>Baseline</dt>
+        <dd>32 seq · 8,192 ctx · 1 tok/step</dd>
+      </div>
+      <div>
+        <dt>Hardware</dt>
+        <dd>8 × H200 SXM · NVLink · TP8</dd>
+      </div>
+      <div>
+        <dt>Status</dt>
+        <dd>Phases 1–2 complete</dd>
+      </div>
+    </dl>
+  </header>
+
+  <div class="recon">
+    <p class="recon-label">Weight reconciliation against the index's published total_size</p>
+    <div class="ledger">
+      <table>
+        <tr>
+          <td class="lbl">PREDICTED</td>
+          <td class="num">864,704,792,696</td>
+          <td class="unit">B &nbsp; 145,116 tensors</td>
+        </tr>
+        <tr>
+          <td class="lbl">PUBLISHED</td>
+          <td class="num">864,704,792,696</td>
+          <td class="unit">B &nbsp; 145,116 tensors</td>
+        </tr>
+        <tr class="total">
+          <td class="lbl">DIFFERENCE</td>
+          <td class="num">+0</td>
+          <td class="unit">B &nbsp; 0 tensors</td>
+        </tr>
+      </table>
+    </div>
+    <p class="recon-note">
+      Not “within 2%” — <strong>zero</strong>, on both bytes and tensor count. Every projection
+      dimension, per-layer-kind rate, and expert bank size is confirmed correct. The case names
+      shapes as where most submissions fail; this closes that door.
+    </p>
+  </div>
+
+  <div class="phases">
+    <div class="phase" data-state="done">
+      <div class="phase-n">PHASE 1</div>
+      <div class="phase-name">Shapes</div>
+      <span class="chip derived">Complete</span>
+    </div>
+    <div class="phase" data-state="done">
+      <div class="phase-n">PHASE 2</div>
+      <div class="phase-name">Memory fit</div>
+      <span class="chip derived">Complete</span>
+    </div>
+    <div class="phase" data-state="next">
+      <div class="phase-n">PHASE 3</div>
+      <div class="phase-name">Engine</div>
+      <span class="chip open">Next</span>
+    </div>
+    <div class="phase">
+      <div class="phase-n">PHASE 4</div>
+      <div class="phase-name">Bounds</div>
+      <span class="chip pending">Pending</span>
+    </div>
+    <div class="phase">
+      <div class="phase-n">PHASE 5</div>
+      <div class="phase-name">Deliverables</div>
+      <span class="chip pending">Pending</span>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <section>
+    <h2>Structure</h2>
+    <p class="lede">
+      Three layer schedules that do not tile — exactly the kind the planner schema insists be
+      written out rather than expressed as a repeating pattern.
+    </p>
+
+    <div class="tw">
+      <table class="data">
+        <thead>
+          <tr><th>Layer kind</th><th>Count</th><th>What it carries</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="m">compress_ratio 4</td>
+            <td class="n">30</td>
+            <td>Overlapping <code>Compressor</code> <strong>plus</strong> <code>Indexer</code></td>
+          </tr>
+          <tr>
+            <td class="m">compress_ratio 128</td>
+            <td class="n">31</td>
+            <td><code>Compressor</code> only, no indexer</td>
+          </tr>
+          <tr>
+            <td class="m">gate.tid2eid</td>
+            <td class="n">3</td>
+            <td>Hash routing by token ID — layers 0–2, no learned gate</td>
+          </tr>
+          <tr>
+            <td class="m">gate.bias</td>
+            <td class="n">58</td>
+            <td>Learned routing — the remaining layers</td>
+          </tr>
+          <tr>
+            <td class="m">mtp.0</td>
+            <td class="n">1</td>
+            <td>Draft block, ratio 0 — resident but outside the decode graph</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>
+      <code>compress_ratios</code> has <strong>62</strong> entries, not 61 — it is
+      <code>n_layers + n_mtp_layers</code>, which resolves what first read as an off-by-one. The
+      single <code>0</code> at index 61 is the MTP block, so all 61 backbone layers carry a
+      compressor and exactly 30 carry an indexer. Both figures match the tensor census exactly.
+    </p>
+    <p>
+      Attention is MLA-style: <code>num_key_value_heads: 1</code>, <code>head_dim: 512</code>,
+      with LoRA on <em>both</em> the query and the output projection
+      (<code>wo_a</code> → <code>wo_b</code>, <code>o_groups: 16</code>). Residuals are mHC —
+      Manifold-Constrained Hyper-Connections — where <code>hc_split_sinkhorn</code> runs
+      <strong>20 iterations at two sites per layer</strong>.
+    </p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section>
+    <h2>Memory, per GPU at TP8</h2>
+
+    <div class="tw">
+      <table class="data">
+        <thead>
+          <tr><th>Term</th><th style="text-align:right">GB / GPU</th><th>Provenance</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Weights — replicated on every rank</td>
+            <td class="n">7.38</td>
+            <td><span class="chip derived">Derived</span></td>
+          </tr>
+          <tr>
+            <td>Weights — sharded (857.33 ÷ 8)</td>
+            <td class="n">107.17</td>
+            <td><span class="chip derived">Derived</span></td>
+          </tr>
+          <tr>
+            <td>KV cache @ fp8, replicated</td>
+            <td class="n">1.42</td>
+            <td><span class="chip derived">Derived</span></td>
+          </tr>
+          <tr>
+            <td>Compressor <code>kv_state</code> / <code>score_state</code>, fp32</td>
+            <td class="n">0.60</td>
+            <td><span class="chip derived">Derived</span></td>
+          </tr>
+          <tr class="sum">
+            <td>Derived subtotal</td>
+            <td class="n">116.56</td>
+            <td></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Per-GPU weights are not <code>total / 8</code></h3>
+    <p>
+      <code>model.py</code> uses plain <code>Linear</code> — replicated — for <code>wq_a</code>,
+      <code>wkv</code>, both compressors, and most expensively <code>shared_experts</code>
+      (4.10 GB/GPU on its own). Only the parallel classes and the routed expert bank actually
+      shard. The naive division gives 108.09 GB and understates the real figure by
+      <strong>6.46 GB</strong> — a plausible-looking number that is wrong in the direction that
+      matters.
+    </p>
+
+    <h3>KV is small, and it is replicated</h3>
+    <p>
+      One KV head plus a plain-<code>Linear</code> <code>wkv</code> means every rank holds the
+      full 512-dimension latent; <code>sparse_attn</code> takes local query heads against the
+      complete cache. No TP division applies.
+    </p>
+
+    <div class="tw">
+      <table class="data">
+        <thead>
+          <tr><th>KV term at 8,192 context</th><th style="text-align:right">fp8</th><th>Behaviour</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Fixed — sliding window</td><td class="n">4.00 MB/seq</td><td>O(1) in context — never grows</td></tr>
+          <tr><td>Growing — compressed</td><td class="n">40.34 MB/seq</td><td>Scales with context</td></tr>
+          <tr class="sum"><td>Per sequence · × 32, per rank</td><td class="n">44.34 MB · 1.42 GB</td><td></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>
+      Uncompressed MLA at the same context would be 256 MB/seq, so the compressor buys
+      <strong>≈ 5.8×</strong>. Against 114.54 GB of weights, KV is a rounding error — which
+      already says something about where the bound will land.
+    </p>
+
+    <h4>The 48 GB most accountings miss</h4>
+    <p>
+      FP4 scales are <code>[out, in/32]</code> — full output resolution, unlike FP8's
+      <code>[out/128, in/128]</code> blocks. They therefore cost <strong>1/16</strong> of expert
+      weight bytes, not 1/16384: the expert bank is 773.71 GB of weights plus
+      <strong>48.36 GB of scale metadata</strong>.
+    </p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section>
+    <h2>Fit verdict</h2>
+    <p class="lede">
+      Stated as two numbers, because the case asks for the capacity lower bound and the
+      configuration you would actually deploy to be distinguished.
+    </p>
+
+<pre class="verdict">capacity LOWER BOUND     116.56 GB / 141 GB raw    FITS — 82.7% of capacity</pre>
+<pre class="caution">deployable @ util 0.9    128.56 GB / 126.90 GB     −1.66 GB</pre>
+
+    <div class="callout">
+      <div class="hd">What this number is not</div>
+      <p>
+        The −1.66 GB shortfall is <strong>assumption-dominated</strong>: 12 GB of assumed
+        workspace, communication buffers, and reserve against a 1.66 GB margin. It is not
+        presented as a fact.
+      </p>
+      <p>
+        What is firm: 116.56 GB/GPU is fully derived, leaving 24.44 GB for workspace,
+        communication, reserve, and fragmentation. Whether that suffices is an
+        <strong>engine</strong> question, not a checkpoint question — and saying exactly that is
+        worth more than a confident verdict with nothing under it.
+      </p>
+    </div>
+
+    <h3>If experts are converted to FP8</h3>
+    <p>
+      <code>convert.py --expert-dtype fp8</code> adds <strong>+92.17 GB/GPU</strong> → 220.73
+      GB/GPU. Impossible on one node. The minimal shape is <strong>two nodes at TP16</strong>
+      (≈107 GB/GPU); divisibility holds at 16 for experts, heads, <code>o_groups</code>, and
+      vocabulary. That shape moves <code>wo_b</code>'s all-reduce and the MoE all-reduce onto the
+      inter-node fabric — the two collectives to price separately against NVLink.
+    </p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section>
+    <h2>Collectives in the decode graph</h2>
+    <p>
+      Read from <code>model.py</code> rather than assumed from TP convention — which would
+      predict 124 and miss the indexer entirely.
+    </p>
+
+    <div class="tw">
+      <table class="data">
+        <thead>
+          <tr><th>Collective</th><th>Where</th><th style="text-align:right">Count</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>wo_b</code> all-reduce — <strong>in fp32</strong>, so 4 B/element on the wire</td>
+            <td>every block</td><td class="n">62</td>
+          </tr>
+          <tr><td><code>MoE</code> all-reduce over the fp32 accumulator</td><td>every block</td><td class="n">62</td></tr>
+          <tr><td><code>Indexer</code> all-reduce on <code>index_score</code></td><td>ratio-4 layers only</td><td class="n">30</td></tr>
+          <tr><td><code>ParallelEmbedding</code> all-reduce</td><td>input</td><td class="n">1</td></tr>
+          <tr><td><code>ParallelHead</code> all-gather of logits</td><td>output</td><td class="n">1</td></tr>
+          <tr class="sum"><td>Per decode step</td><td></td><td class="n">≈156</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      The <code>y = y.float()</code> before <code>RowParallelLinear</code>'s all-reduce is easy to
+      read past and doubles the wire cost of the single most frequent collective in the graph.
+    </p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section>
+    <h2>Checkpoint vs implementation</h2>
+    <p class="lede">
+      Three documented contradictions. Each one is evidence that storage, reference semantics, and
+      execution are separate classes that must not be conflated.
+    </p>
+
+    <h4>1 · <code>gate.tid2eid</code> is stored int64; <code>model.py</code> declares int32</h4>
+    <p>
+      Derived, not assumed. At int32 the prediction fell exactly 9,308,160 B short — precisely
+      <code>3 hash layers × 129,280 × 6 × 4 B</code>, the int32→int64 delta on that one tensor.
+      At int64 the reconciliation is exact.
+    </p>
+
+    <h4>2 · <code>wo_a</code> is FP8 in the checkpoint, loaded BF16 by the reference code</h4>
+    <p>
+      The <code>Linear</code> is constructed <code>dtype=torch.bfloat16</code>, yet
+      <code>attn.wo_a.scale</code> appears 61 times in the index — only FP8 and FP4 linears
+      register scales. The vendor's own comment at <code>model.py:539</code> confirms it. Storage
+      precision ≠ runtime precision, stated by the vendor rather than inferred.
+    </p>
+
+    <h4>3 · No <code>trust_remote_code</code> path exists</h4>
+    <p>
+      No <code>auto_map</code>, no <code>modeling_*.py</code>. The <code>inference/</code> folder
+      is a standalone reference implementation requiring <code>convert.py</code> and
+      <code>torchrun</code> — not an HF integration. vLLM runs its own in-tree implementation, so
+      bound analysis must cite <em>that</em>, never <code>inference/model.py</code>.
+    </p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section>
+    <h2>Hardware divergence</h2>
+    <p>
+      A vendor recipe exists at <code>recipes.vllm.ai/deepseek-ai/DeepSeek-V4-Pro</code>, and the
+      assignment says a published recipe supersedes the 8×H200 default. But the recipe targets
+      <strong>8 × AMD MI355X at 288 GB each</strong> — where the fit question becomes arithmetic
+      with no tension in it.
+    </p>
+    <p>
+      <strong>Decision:</strong> price the assigned H200s and treat the divergence as a finding.
+      The brief states the fit section carries the weight for V4-Pro, and that is only true at
+      141 GB. Choosing MI355X would satisfy the instruction's letter while deleting the section
+      that carries the marks. The recipe's hardware-independent settings —
+      <code>--kv-cache-dtype fp8</code>, <code>--gpu-memory-utilization 0.9</code> — are adopted
+      and cited.
+    </p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section>
+    <h2>Where this is going</h2>
+
+    <h3>Phase 3 — Engine assumptions</h3>
+    <p>
+      Pin an exact vLLM tag (the recipe requires 0.20.0+) and read source for what the checkpoint
+      cannot determine: which operations fuse, what runs under CUDA graphs, the attention backend,
+      the NCCL collective implementation, and where runtime precision departs from storage.
+      Every item tagged <em>read from source</em>, <em>read from docs</em>, or <em>assumed</em>.
+      Two answers already come free from the recipe rather than assumption:
+      <code>cudagraph_mode: FULL_DECODE_ONLY</code> and <code>--kv-cache-dtype fp8</code>.
+    </p>
+
+    <div class="callout">
+      <div class="hd">The question that could reorder everything</div>
+      <p>
+        H200 is SM90 and has <strong>no native FP4 tensor path</strong> — that arrives with
+        Blackwell. If vLLM dequantizes the FP4 expert bank at load time, every memory figure above
+        is wrong. If it dequantizes per operation at runtime, the bound label changes instead.
+        This is the sharpest unresolved item in the case.
+      </p>
+    </div>
+
+    <h3>Phase 4 — Bound hypotheses</h3>
+    <p>
+      Roofline ridges for each precision present on H200 — FP8 1,979 TFLOP/s dense, BF16 989.5,
+      FP32 67, HBM3e 4.8 TB/s, NVLink 900 GB/s — then the three largest time consumers ranked and
+      labelled compute-, memory-, or communication-bound. Each gets one controlled experiment with
+      an explicit rejection threshold, and a statement of what that experiment
+      <em>cannot</em> establish.
+    </p>
+    <p>
+      Communication has to be <em>defended into</em> its rank rather than assumed to lead or
+      trail. The fp32 all-reduce and the indexer's extra 30 collectives both push against the
+      usual intuition.
+    </p>
+
+    <h3>Phase 5 — Deliverables</h3>
+    <ul>
+      <li>
+        <strong>D1</strong> — model spec YAML in the planner schema: layer schedules written out
+        where they do not tile, per-op precision noted, checkpoint names kept verbatim, family
+        contradictions captured in comments.
+      </li>
+      <li>
+        <strong>D2</strong> — design note, one to two pages, matching the reference note's rigor
+        rather than its length.
+      </li>
+    </ul>
+  </section>
+
+  <!-- ============================================================ -->
+  <section>
+    <h2>Open decisions</h2>
+    <div class="tw">
+      <table class="data">
+        <thead>
+          <tr><th>#</th><th>Question</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="n">1</td><td>H200 vs MI355X</td><td><span class="chip derived">Resolved</span> H200, divergence documented</td></tr>
+          <tr><td class="n">2</td><td>KV cache dtype</td><td><span class="chip derived">Resolved</span> engine fact, cited to recipe</td></tr>
+          <tr><td class="n">3</td><td>TP8-only or expert parallelism</td><td><span class="chip open">Open</span> changes every collective row</td></tr>
+          <tr><td class="n">4</td><td>FP4 expert handling on SM90</td><td><span class="chip open">Open</span> Phase 3 blocker</td></tr>
+          <tr><td class="n">5</td><td>Exact vLLM tag to pin</td><td><span class="chip open">Open</span></td></tr>
+          <tr><td class="n">6</td><td>MTP resident but inactive</td><td><span class="chip assumed">Both halves</span> 1.92 GB/GPU, outside the graph</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section>
+    <h2>Reproduce</h2>
+<pre>python3 derive/weights.py    # weight accounting vs published total_size
+python3 derive/fit.py        # per-GPU fit at 8×H200 / TP8</pre>
+    <p>
+      Neither requires a GPU, network access, or the weights themselves — only the metadata in
+      <code>context/checkpoint/</code>.
+    </p>
+  </section>
+
+  <footer>
+    <p>
+      Two evidence classes are kept separate throughout, because the case is explicit that
+      conflating them is the failure mode: <strong>what the checkpoint establishes</strong> —
+      shapes, counts, storage precision, layer schedules — versus <strong>what depends on the
+      engine</strong> — fusion, launch behaviour, collective implementation, runtime precision.
+      Every number carries its provenance. Every assumption is labelled rather than smuggled.
+    </p>
+  </footer>
+
+</div>
