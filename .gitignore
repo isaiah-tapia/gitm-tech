@@ -1,5 +1,4 @@
-# Private study notes — not part of the deliverable
-.study/
+.ns/
 
 # Python
 __pycache__/
