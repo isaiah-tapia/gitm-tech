@@ -479,14 +479,106 @@ per-layer `RowParallelLinear` all-reduce in `wo_b` and the `MoE` all-reduce now 
 ⇒ **2 all-reduces × 62 blocks + 30 indexer all-reduces + 2 endpoint collectives ≈ 156 per step.**
 Not the 2/layer a TP convention would assume — the indexer adds a third on half the layers.
 
-## 12. Phase 3 — next
+## 12. Phase 3 — engine assumptions. FP4-on-SM90 RESOLVED.
 
-- [ ] Pin exact vLLM tag (recipe says 0.20.0+). Read source for: FP4 expert kernel path on
-      SM90 (does it dequantize at load or per-op?), fusion, attention backend, NCCL algo.
-- [ ] Roofline ridges for H200: FP8 1,979 TFLOP/s dense, BF16 989.5, FP32 67, HBM 4.8 TB/s,
-      NVLink 900 GB/s. **FP4 has no SM90 tensor path — that is the sharpest open question.**
-- [ ] Top-3 bound hypotheses + rejection thresholds.
-- [ ] Write D1 (YAML) and D2 (design note).
+**Engine pinned: vLLM `v0.29.0`** (latest stable; recipe requires 0.20.0+). `v0.28.0`'s notes
+call out DeepSeek-V4 performance work specifically.
+
+### The expert format is MXFP4 — OCP MX spec, not NVFP4
+My Phase-1 shape derivation independently confirms it: `model.py` stores expert weights as
+`float4_e2m1fn_x2` `[out, in//2]` with scale `[out, in//32]` in `float8_e8m0fnu`. **e2m1 elements
++ e8m0 scale per 32 along K** is exactly OCP MXFP4. This matters because the vLLM backend
+selection for MXFP4 and NVFP4 is different code. *(checkpoint class — derived)*
+
+### On H200 the expert GEMMs run **Marlin W4A16** — i.e. BF16 math
+| Finding | Evidence class |
+|---|---|
+| DeepSeek-V4 MXFP4 MoE backend priority: `FLASHINFER_TRTLLM_MXFP4_MXFP8` → `DEEPGEMM_MXFP4` → `MARLIN` → `BATCHED_MARLIN` | **read from source** — `vllm/model_executor/layers/fused_moe/oracle/mxfp4.py` @ v0.29.0 |
+| "On SM90 only Marlin W4A16 passes" | **read from PR** — [#53709](https://github.com/vllm-project/vllm/pull/53709), author's own Hopper benchmark |
+| Native MXFP4 W4A8 backends gated to Blackwell SM100/SM120 | read from PR + search; **not yet verified in source** |
+| Per-backend capability gates live in `is_supported_config` on each kernel class, **not** in the oracle | read from source |
+
+⚠️ **Remaining verification step:** the capability conditionals are in the kernel classes, not the
+oracle — `TrtLlmMxfp4ExpertsMonolithic`, `DeepGemmFP4Experts`, `MarlinExperts`.`is_supported_config()`.
+Promote "SM90 → Marlin" from *read from PR* to *read from source* by quoting those. Corroborating
+logic meanwhile: the PR's entire premise is a **Hopper** speedup obtained by leaving FP4, which only
+makes sense if Hopper's FP4 path is the slow one.
+
+⇒ **Runtime precision ≠ storage precision, again.** Experts are stored MXFP4 but computed at
+**BF16 tensor-core rate (989.5 TFLOP/s)**, because Marlin W4A16 dequantizes in-kernel to 16-bit
+activations. Memory traffic stays at the FP4 rate; only the math runs at BF16. Price the expert
+GEMMs against 989.5, **not** 1,979.
+
+### The FP8-expert escape hatch is closed twice over
+`VLLM_DSV4_FP4_DEQUANT=1` (PR #53709) re-encodes MXFP4 → block-FP8 (e4m3, 128×128) **at load
+time**, bit-exact (MX scales are pure powers of two, so e4m3 absorbs the per-32 group ratio), and
+runs the existing block-FP8 MoE kernel on FP8 tensor cores. It is unavailable here for two
+independent reasons:
+
+1. **It is not in any release.** PR #53709 is **open, not merged** (dated 2026-08-25). On the
+   pinned v0.29.0 the flag does not exist.
+2. **It would not fit if it did.** 2× expert bytes = **+92.17 GB/GPU → 220.73 GB/GPU** vs 141 GB.
+   This is the Phase-2 number, now with an engine-side reason to care about it.
+
+Published speedups from that PR — note the split:
+| | gain |
+|---|---|
+| prefill 2,048 tok | 1.53× |
+| prefill 8,192 tok | 1.38× |
+| concurrent prefill, 32 req @ 8k | **2.04×** |
+| **decode, 32 concurrent** | **1.13×** |
+
+**Decode barely moves.** Exactly what a memory-bound decode predicts: doubling the bytes you
+stream while speeding up the math is close to a wash. Prefill is compute-bound, so it gains.
+This is a strong independent signal for the Phase-4 ranking.
+
+### Settled from the recipe rather than assumed
+- `cudagraph_mode: FULL_DECODE_ONLY` → decode runs under CUDA graphs, prefill does not.
+  Launch overhead ≈ graph-replay (~2 µs), not eager (~5 µs). *(read from docs — vendor recipe)*
+- `--kv-cache-dtype fp8` → KV at 1 B/element. *(read from docs — vendor recipe)*
+- `--compilation-config mode 3` → torch.compile level, fusion decisions delegated there.
+- `--enable-expert-parallel` **absent** → TP-only for the MoE at the vendor's shape.
+
+### MoE sharding is expert-parallel *inside* the TP group
+`model.py` `MoE.__init__`: `n_local_experts = n_routed_experts // world_size`,
+`experts_start_idx = rank * n_local_experts`. Each rank owns **48 whole experts**, not a width
+shard of all 384. So the "TP8" label hides EP8 behaviour for the routed bank — which is why the
+collective is an `all_reduce` over a full-width accumulator rather than a reduce-scatter.
+
+### First-cut decode arithmetic (Phase-4 seed, NOT yet checked twice)
+At 32 tokens × top-6 over 384 experts, expected **distinct** experts touched per layer
+= `384 × (1 − (1−1/384)^192) ≈ 151` globally, **≈18.9 of the 48 on each rank**.
+Each expert = 3 × (7168×3072) MXFP4 = 33.03 MB + 2.06 MB scales = **35.09 MB**.
+⇒ ≈663 MB per layer per rank × 61 layers ≈ **40.4 GB streamed per decode step per rank**
+(≈42% of the 96.7 GB local bank). At 4.8 TB/s ⇒ **≈8.4 ms/step**, ⇒ ~3,800 tok/s aggregate at
+batch 32. **Sanity check: PR #53709 measured 1,642–1,856 tok/s decode at 32 concurrent — same
+order of magnitude**, which is the right kind of agreement for a roofline floor to have with a
+real measurement. Assumes uniform routing; real imbalance only makes it worse.
+
+## 12b. D2 draft exists — `docs/DESIGN-NOTE.md`
+
+Written 2026-09-16. Sections 1 (engine assumptions) and 2 (memory fit) complete. Section 3
+(bound hypotheses) partial: hypothesis 1 has arithmetic, 2 and 3 have shape but no numbers, and
+**none of the three controlled experiments is written**. Section 4 lists next steps ranked by
+impact.
+
+House style for this file, keep it: **no em dashes, no en dashes**, plain human prose, short
+sentences. Verified zero of both.
+
+Length is ~3,700 words, over the "one to two pages" ask. That is fine for a working draft with
+status markers, but **the final pass must cut it down**. The case says match the reference note's
+rigor, not its length. Cut candidates: §1.2 detail, §2.4 table duplication, §4 prose.
+
+## 13. Phase 4 — next
+
+- [ ] Re-derive the expert-streaming number carefully (it is the likely #1 bound) and add the
+      attention-weight and KV streaming terms.
+- [ ] Roofline ridges: **BF16 989.5 TFLOP/s for the expert GEMMs (Marlin W4A16)**, FP8 1,979 for
+      the backbone, FP32 67 for the router and the fp32 all-reduces, HBM 4.8 TB/s, NVLink 900 GB/s.
+- [ ] Price the ≈156 collectives; remember `wo_b`'s all-reduce is **fp32 on the wire**.
+- [ ] Rank top-3 with compute/memory/comm labels + one falsifiable experiment each
+      (hold fixed / vary / observable / rejection threshold / what it cannot establish).
+- [ ] Then Phase 5: D1 YAML + D2 design note.
 
 ## 9. Conventions for this repo
 
