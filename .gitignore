@@ -1,0 +1,9 @@
+# Private study notes — not part of the deliverable
+.study/
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
