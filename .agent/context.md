@@ -8,9 +8,6 @@ source) or **assumed** (marked as such). Never promote an assumption to a fact w
 
 ## 1. What this repo is
 
-A take-home / evaluation case for **GitM (Git Machine)**, a GPU execution runtime company.
-Repo root: `/Users/isaiahtapia/gitm-tech`. Currently contains only source material — no code yet.
-
 | Path | What it is |
 |---|---|
 | `context/case-deepseek-v4-pro.md` | The assignment. Authoritative for scope, deliverables, scoring. |
@@ -24,8 +21,6 @@ Repo root: `/Users/isaiahtapia/gitm-tech`. Currently contains only source materi
 
 **Task:** Predict how **DeepSeek V4 Pro** executes *one decode step*, derived from the
 checkpoint's own files, before ever seeing it run. No GPU, no traces, nothing to run.
-
-**Time cap:** 3 hours. Scope is cut to fit; stretch items marked optional.
 
 ### Baseline workload (all fit/bound claims evaluated here)
 - 32 active sequences, decode phase
