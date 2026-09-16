@@ -555,6 +555,22 @@ batch 32. **Sanity check: PR #53709 measured 1,642–1,856 tok/s decode at 32 co
 order of magnitude**, which is the right kind of agreement for a roofline floor to have with a
 real measurement. Assumes uniform routing; real imbalance only makes it worse.
 
+## 12a. Test suite — `tests/test_derivations.py`, 29 passing
+
+`python3 tests/test_derivations.py` (standalone, no deps; also pytest-collectable).
+Two kinds of test, deliberately:
+- **golden** — pins every number the design note quotes, so a refactor that moves a figure fails loudly
+- **reasoning** — pins the *arguments*. A number can stay right while its justification rots.
+  e.g. `test_fp4_expert_storage_is_forced_not_merely_labelled` asserts the FP8 reading *exceeds*
+  `total_size`, which is what makes FP4 a derivation instead of a label;
+  `test_tid2eid_int32_produces_the_exact_known_residual` pins the 9,308,160 B derivation;
+  `test_kv_window_term_is_invariant_in_context` pins the O(1) split at 2k/8k/1M.
+
+**A failing test already caught a real error.** `220.73 GB` for the FP8-expert conversion mixed
+derived weights with *assumed* workspace. The clean derived figure is **weights alone = 206.71
+GB/GPU** vs 141 GB. Design note §2.6 corrected. Rule going forward: **never compare a total
+containing assumed terms against a hard capacity limit** when the derived terms already settle it.
+
 ## 12b. D2 draft exists — `docs/DESIGN-NOTE.md`
 
 Written 2026-09-16. Sections 1 (engine assumptions) and 2 (memory fit) complete. Section 3
@@ -569,7 +585,53 @@ Length is ~3,700 words, over the "one to two pages" ask. That is fine for a work
 status markers, but **the final pass must cut it down**. The case says match the reference note's
 rigor, not its length. Cut candidates: §1.2 detail, §2.4 table duplication, §4 prose.
 
-## 13. Phase 4 — next
+## 13. Phase 4 — COMPLETE. `derive/bounds.py` + D2 §3 written.
+
+Per rank per decode step, baseline, 8×H200 TP8:
+
+| Rank | Term | Time | Bound |
+|---|---|---:|---|
+| 1 | expert weight streaming (routed 40.47 GB + shared 4.03 GB) | 9.27 ms | memory |
+| 2 | launch/dispatch, ~4,326 kernels under graph capture | 2.16 ms | latency |
+| 3 | other HBM (attn weights 4.69, KV 1.17, head 0.23) | 1.41 ms | memory |
+| | compute, all precisions (770.67 GFLOP) | 0.77 ms | compute |
+| | collectives, bandwidth only (224.93 MB) | 0.25 ms | comm |
+
+- **Total HBM 51.26 GB/step → 10.68 ms. AI = 15.03 FLOP/B vs BF16 ridge 206 → memory-bound by 14×.**
+- **Step floor 13.09 ms → 2,444 tok/s** vs PR #53709's measured 1,642–1,856 tok/s.
+  **Floor sits 1.40× ABOVE measurement, which is the only correct direction.** Below would be an error.
+- FP32 row is 2% of FLOPs but **31% of compute time** (router + mHC on CUDA cores at 67 TF/s).
+  Irrelevant at batch 32; first to matter if batch grows.
+
+### Corrections this phase forced
+1. **Collectives are 154, not 156.** Speculation disabled ⇒ MTP block never runs ⇒ contributes
+   zero collectives. 156 counted a block that does not execute. Test updated; D2 §1.4 updated.
+2. **`hc_split_sinkhorn` is ONE fused TileLang kernel**, not 20 launches. `T.serial(iters-1)` runs
+   in registers on a 4×4 fragment (`inf_kernel.py:372-438`). The draft's worry about 2,440 small
+   mHC ops was wrong. Killed it.
+3. `220.73 GB` appeared a second time in §1.2; corrected to weights-alone 206.71 GB.
+
+### The sharpest prediction in the note (D2 §3, Experiment 3)
+On the 30 ratio-4 layers the indexer selects `index_topk = 1024` positions. Past ctx 4,096 there
+are more than 1,024 compressed slots, so **the attention gather stops growing entirely — it is
+capped by `index_topk`, not by context.** Only the 31 ratio-128 layers (ctx/128) and the indexer's
+own scan (ctx/4) still scale. ⇒ **quadrupling context 8k→32k adds <3% to the step.** Falsifiable,
+specific, and cheap to test.
+
+### Communication defended into 4th/5th, not assumed
+Bandwidth: 224.93 MB @ 900 GB/s = **0.25 ms**. But 154 separate collectives each carry a
+small-message NVLink latency floor of ~5–10 µs; at 7 µs that is **1.08 ms**, which would make it
+rank 3. Honest answer is a **range, 0.25–1.3 ms**: 4th or 5th on bandwidth, 3rd at worst, never
+1st (rank 1 is 9.27 ms). Under the 2-node TP16 shape it could become rank 1 or 2; not priced.
+
+## 14. Phase 5 — remaining
+
+- [ ] **D1, the planner-schema YAML.** Not started. Follow `mimo-v2.5.yaml`: `spec:` + `provenance:`
+      with verified/estimated/open/unmodelled, layer schedules written out, checkpoint names verbatim.
+- [ ] Trim D2 from ~5,100 words toward the one-to-two page ask.
+- [ ] Optional: promote the Marlin claim from *read from PR* to *read from source*.
+
+## 13b. Phase 4 — original checklist (all done)
 
 - [ ] Re-derive the expert-streaming number carefully (it is the likely #1 bound) and add the
       attention-weight and KV streaming terms.

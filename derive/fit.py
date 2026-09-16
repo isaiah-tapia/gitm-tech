@@ -117,7 +117,7 @@ def per_gpu_weight_bytes():
 
 
 # -------------------------------------------------------------------- kv
-def kv_bytes_per_seq(elem_bytes):
+def kv_bytes_per_seq(elem_bytes, ctx=CTX):
     """model.py Attention: kv_cache is [max_batch, window + max_seq//ratio, head_dim].
     The window term is O(1) in context -- it never grows. Only the compressed term
     scales with context. Counting the whole cache per-token is the classic error.
@@ -125,6 +125,9 @@ def kv_bytes_per_seq(elem_bytes):
     num_key_value_heads == 1 and wkv is a plain `Linear`, so the latent KV is
     REPLICATED across TP ranks, not sharded: every rank needs the full 512-dim
     latent to attend with its local query heads.
+
+    Returns (fixed_bytes, growing_bytes) so the two terms stay separable -- the
+    test suite asserts the first is invariant in ctx and the second is linear.
     """
     fixed = 0      # window part, independent of context length
     grow = 0       # compressed part, scales with context
@@ -132,9 +135,9 @@ def kv_bytes_per_seq(elem_bytes):
         ratio = W.RATIOS[lid]
         fixed += WINDOW * KV_DIM
         if ratio:
-            grow += (CTX // ratio) * KV_DIM
+            grow += (ctx // ratio) * KV_DIM
             if ratio == 4:
-                grow += (CTX // ratio) * IDX_DIM        # Indexer.kv_cache
+                grow += (ctx // ratio) * IDX_DIM        # Indexer.kv_cache
     return fixed * elem_bytes, grow * elem_bytes
 
 

@@ -1,0 +1,394 @@
+# Intended path in GitM-Labs/runtime: gitm/planner/models/deepseek-v4-pro.yaml
+#
+# DeepSeek-V4-Pro. Sparse-attention MoE with per-layer KV compression, a learned
+# top-k indexer on half the layers, hash routing on three, and mHC residuals.
+# Source: the checkpoint's own config.json + model.safetensors.index.json, with
+# module shapes read from inference/model.py (the checkpoint's own reference
+# implementation; there is NO trust_remote_code path, see provenance.open).
+#
+# Module and tensor names below are the checkpoint's, verbatim. They do not
+# follow HF convention: there is no `model.` prefix, projections are wq_a/wq_b
+# and wo_a/wo_b rather than q_proj/o_proj, and the FFN is `ffn` not `mlp`.
+
+name: deepseek-ai/DeepSeek-V4-Pro
+revision: b5968e9190ef611bbf34a7229255be88a0e937c1
+family: sparse-moe
+description: >
+  61 layers plus one MTP block, top-6 of 384 routed experts with one shared
+  expert, 1.6T total and 49B active. Every layer runs sliding-window attention
+  over a compressed KV latent; 30 layers add a learned Indexer that selects
+  index_topk compressed positions, and 31 take every compressed slot. Three
+  layers route by a token-id lookup table instead of a learned gate. Residuals
+  are mHC rather than additive. Four storage precisions in one checkpoint:
+  MXFP4 routed experts, FP8 e4m3 backbone, BF16 norms and compressors, FP32
+  mHC and router bias.
+
+spec:
+  hidden: 7168
+  n_layers: 61
+  vocab: 129280                     # untied; `head.weight` is its own tensor
+
+  # ---- Attention. MLA-style latent: num_kv_heads is 1 and head_dim is 512, so
+  # 128 query heads attend against ONE 512-wide latent. `wkv` is a plain Linear
+  # in model.py, not ColumnParallel, so the latent is REPLICATED on every TP
+  # rank rather than sharded. Nothing about the KV divides by TP.
+  n_heads: 128
+  num_kv_heads: 1
+  head_dim: 512
+  qk_rope_head_dim: 64
+  partial_rotary_factor: 0.125      # 64 of 512 dims rotate
+
+  # Low-rank on BOTH ends. wq_a: [1536, 7168] -> q_norm -> wq_b: [65536, 1536].
+  # The output side is the unusual one: wo_a's INPUT is n_heads*head_dim/o_groups
+  # = 4096, NOT n_heads*head_dim = 65536. Using the ungrouped width overstates
+  # that projection by 16x and is the single easiest shape error in this model.
+  q_lora_rank: 1536
+  o_lora_rank: 1024
+  o_groups: 16
+  attn_sink: true                   # `attn.attn_sink`, [n_local_heads] fp32
+
+  sliding_window: 128
+
+  # ---- KV compression schedule. THE LIST IS 62 LONG, NOT 61: it covers
+  # n_layers + n_mtp_layers, and index 61 is the MTP block. Reading it as 61
+  # entries makes layer 60 look compressor-less and contradicts the tensor
+  # census, which shows 61 `attn.compressor.*` and 30 `attn.indexer.*`.
+  #
+  # Ratio 4 builds Compressor(overlap=True) AND an Indexer.
+  # Ratio 128 builds Compressor(overlap=False) and no Indexer.
+  # Ratio 0 builds neither, and only the MTP block has it.
+  compress_ratios: [
+    128, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128,
+    4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128,
+    4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128,
+    4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128,
+    4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128,
+    4, 0
+  ]
+
+  # Written out rather than tiled. The indexed layers are 2, 4, 6, ... 60, all
+  # even, but layers 0 AND 1 are both strided, so the alternation does not start
+  # until index 2. No {pattern, repeat} form reproduces this. A modulo rule
+  # guessed from the interval ("even layers are indexed") puts layer 0 in the
+  # wrong class and yields 31 indexed layers instead of 30, which still sums to
+  # 61 and still looks entirely plausible. The tensor census is what catches it.
+  layer_types: [
+    sparse_strided, sparse_strided, sparse_indexed, sparse_strided,
+    sparse_indexed, sparse_strided, sparse_indexed, sparse_strided,
+    sparse_indexed, sparse_strided, sparse_indexed, sparse_strided,
+    sparse_indexed, sparse_strided, sparse_indexed, sparse_strided,
+    sparse_indexed, sparse_strided, sparse_indexed, sparse_strided,
+    sparse_indexed, sparse_strided, sparse_indexed, sparse_strided,
+    sparse_indexed, sparse_strided, sparse_indexed, sparse_strided,
+    sparse_indexed, sparse_strided, sparse_indexed, sparse_strided,
+    sparse_indexed, sparse_strided, sparse_indexed, sparse_strided,
+    sparse_indexed, sparse_strided, sparse_indexed, sparse_strided,
+    sparse_indexed, sparse_strided, sparse_indexed, sparse_strided,
+    sparse_indexed, sparse_strided, sparse_indexed, sparse_strided,
+    sparse_indexed, sparse_strided, sparse_indexed, sparse_strided,
+    sparse_indexed, sparse_strided, sparse_indexed, sparse_strided,
+    sparse_indexed, sparse_strided, sparse_indexed, sparse_strided,
+    sparse_indexed
+  ]
+  n_sparse_indexed_layers: 30
+  n_sparse_strided_layers: 31
+
+  # ---- Compressor. `attn.compressor.{ape,wkv,wgate,norm}`, present on all 61
+  # backbone layers. coff = 1 + (ratio == 4): the overlap path packs two
+  # head_dim-wide halves into one tensor, so the ratio-4 compressor is twice the
+  # width of the ratio-128 one despite compressing 32x less aggressively.
+  compressor_overlap_ratio: 4
+  compressor_state_dtype: fp32      # kv_state and score_state, sized by RATIO
+                                    # not by context; the ratio-128 layers carry
+                                    # the LARGER buffer, 128 slots against 8
+
+  # ---- Indexer. `attn.indexer.{wq_b,weights_proj,compressor.*}` on the 30
+  # sparse_indexed layers only. It scans the whole compressed cache (ctx/4
+  # entries) to select index_topk of them, so its READ is linear in context
+  # while the attention gather it feeds is capped.
+  index_n_heads: 64
+  index_head_dim: 128
+  index_topk: 1024
+  indexer_compressor_ratio: 4
+  indexer_kv_dtype: bf16            # separate buffer from the main KV cache and
+                                    # NOT covered by --kv-cache-dtype; see open
+
+  # ---- MoE. Each rank owns n_routed_experts/world_size WHOLE experts
+  # (model.py: experts_start_idx = rank * n_local_experts), so what is labelled
+  # TP is expert-parallel for the routed bank. That is why the collective is an
+  # all_reduce over a full-width accumulator and not a reduce_scatter.
+  num_experts: 384
+  num_experts_per_tok: 6
+  n_shared_experts: 1
+  moe_intermediate_size: 3072
+  shared_expert_intermediate_size: 3072
+  expert_shard_mode: whole_expert    # not width-sharded
+  expert_tensor_names: [w1, w2, w3]  # not gate_proj/up_proj/down_proj
+
+  # `ffn.shared_experts.*` is a plain Linear, so it is REPLICATED on every rank.
+  # At 4.10 GB/GPU it is the largest single replicated item in the model and the
+  # main reason per-GPU weights are not total/TP.
+  shared_experts_replicated: true
+
+  # ---- Routing. Three layers replace the learned gate with a token-id lookup.
+  # The census agrees: `ffn.gate.tid2eid` x3, `ffn.gate.bias` x58, 3 + 58 = 61.
+  n_hash_layers: 3
+  hash_layers: [0, 1, 2]
+  hash_table_dtype: int64            # model.py DECLARES int32; see provenance
+  scoring_func: sqrtsoftplus         # NOT sigmoid. V3 used sigmoid, and the
+                                     # weights are renormalised after gather,
+                                     # which softmax routing does not do.
+  topk_method: noaux_tc
+  routed_scaling_factor: 2.5
+  swiglu_limit: 10.0                 # clamped SwiGLU, applied to both halves
+
+  # ---- mHC residuals. `hc_attn_*` and `hc_ffn_*` per block, `hc_head_*` at
+  # model level. Replaces the additive residual entirely: the hidden state is
+  # carried as hc_mult copies and mixed by a Sinkhorn-normalised matrix.
+  # mix_hc = (2 + hc_mult) * hc_mult = 24, hc_dim = hc_mult * hidden = 28672.
+  hc_mult: 4
+  hc_sinkhorn_iters: 20
+  hc_mix_width: 24
+  hc_sites_per_layer: 2              # one before attention, one before the FFN
+  hc_fused_kernel: true              # all 20 iterations run inside ONE TileLang
+                                     # kernel on a 4x4 register fragment
+                                     # (kernel.py hc_split_sinkhorn_kernel,
+                                     # T.serial(sinkhorn_iters - 1)). NOT 20
+                                     # launches, and not 2440 ops per step.
+
+  # ---- Multi-token prediction. Resident but inert at the text baseline.
+  mtp_num_hidden_layers: 1
+  mtp_compress_ratio: 0              # compress_ratios[61]; no compressor, no indexer
+  mtp_extra_modules: [e_proj, h_proj, enorm, hnorm, norm, hc_head_fn]
+  mtp_shares_embed_and_head: true    # model.py assigns the parent's, not copies
+
+  # ---- RoPE. Two thetas. Windowed positions use rope_theta with YaRN DISABLED
+  # (model.py sets original_seq_len = 0 when compress_ratio is 0); compressed
+  # positions use compress_rope_theta with YaRN on.
+  rope_theta: 10000
+  compress_rope_theta: 160000
+  rope_scaling_type: yarn
+  rope_factor: 16
+  original_max_position_embeddings: 65536
+  max_position_embeddings: 1048576
+
+  # ---- Collectives. Counted from the dist.* call sites in model.py, not from a
+  # TP convention. A flat 2-per-layer gives 124 and misses the indexer's third
+  # collective on 30 layers.
+  all_reduces_per_layer: 2           # wo_b (RowParallelLinear), MoE accumulator
+  indexer_all_reduce_layers: 30      # dist.all_reduce(index_score)
+  endpoint_collectives: 2            # embed all_reduce, head all_gather
+  collectives_per_decode_step: 154   # 2*61 + 30 + 2, MTP excluded when
+                                     # speculation is off; 156 with it on
+  all_reduce_wire_dtype: fp32        # RowParallelLinear does y = y.float()
+                                     # BEFORE dist.all_reduce, so the most
+                                     # frequent collective moves 4 B/element
+
+  # ---- Precision. Four storage dtypes, and compute precision differs from
+  # storage on Hopper for the largest term in the model.
+  weight_dtype: fp8                  # e4m3, ue8m0 scales, block [128, 128]
+  expert_weight_dtype: fp4           # config's own label; the format is MXFP4:
+                                     # float4_e2m1fn_x2 weights [out, in//2]
+                                     # plus float8_e8m0fnu scales [out, in//32]
+  act_dtype: bf16
+  kv_dtype: fp8                      # SERVING decision from the vendor recipe,
+                                     # not a checkpoint fact; see open
+  scale_fmt: ue8m0
+  weight_block_size: [128, 128]
+  fp4_block_size: 32                 # along K only, full output resolution, so
+                                     # FP4 scale overhead is 1/16 of weight
+                                     # bytes and not 1/16384 like the FP8 blocks
+  op_dtype_overrides:
+    - [attn_wo_a, bf16]              # FP8 in the checkpoint (attn.wo_a.scale
+                                     # exists on all 61 layers) but model.py:462
+                                     # builds it dtype=bfloat16, and the comment
+                                     # at model.py:539 says so outright
+    - [routed_experts, bf16]         # stored MXFP4, COMPUTED bf16 on SM90:
+                                     # vLLM falls through to Marlin W4A16
+                                     # because the FlashInfer and DeepGEMM
+                                     # MXFP4 backends are Blackwell-gated.
+                                     # Pricing these against the fp8 peak is 2x
+                                     # optimistic on 79% of the step's bytes.
+    - [ffn_gate, fp32]               # linear(x.float(), weight.float())
+    - [hc_split_sinkhorn, fp32]      # constructed under set_dtype(float32)
+    - [compressor_wkv, bf16]         # stored bf16, computed fp32 in model.py
+    - [compressor_wgate, bf16]
+    - [indexer_weights_proj, bf16]   # no .scale tensor in the index
+    - [embed, bf16]
+    - [head, bf16]
+    - [attn_score_value, bf16]       # sparse_attn has no weights; it reads the
+                                     # cache, so it prices against kv_dtype
+
+  # ---- Sharding. Per-GPU weights are NOT total/TP. These modules use plain
+  # Linear in model.py and are therefore replicated in full on every rank.
+  replicated_modules:
+    - ffn.shared_experts             # 4.10 GB/GPU, the largest
+    - attn.compressor                # 1.35 GB/GPU
+    - attn.wq_a                      # 0.68 GB/GPU
+    - hc_attn_fn, hc_ffn_fn          # 0.34 GB/GPU, fp32
+    - ffn.gate.weight                # 0.34 GB/GPU
+    - attn.wkv                       # 0.23 GB/GPU
+    - attn.indexer.compressor        # 0.22 GB/GPU
+    - ffn.gate.tid2eid               # 0.019 GB/GPU
+  replicated_bytes_per_gpu_gb: 7.38
+  sharded_modules:
+    - attn.wq_b, attn.wo_a           # ColumnParallelLinear
+    - attn.wo_b                      # RowParallelLinear
+    - attn.indexer.wq_b, attn.indexer.weights_proj
+    - ffn.experts                    # whole experts, 48 per rank at TP8
+    - embed, head                    # vocab-sharded
+
+provenance:
+  verified:
+    - claim: predicted weight bytes match the published checkpoint exactly
+      detail: >
+        864,704,792,696 B predicted against the index's total_size of
+        864,704,792,696 B, and 145,116 tensors against 145,116. Difference is
+        zero on both, not the low-single-digit percent gap the other specs in
+        this directory carry, because this model has no vision or audio tower
+        and the MTP block IS enumerated here. Reproduce with
+        `python3 derive/weights.py`. A wrong projection dim would have to be
+        cancelled by another wrong dim to the byte.
+    - claim: the layer schedule cannot be expressed as a repeating pattern
+      detail: >
+        Indexed layers are 2, 4, 6 ... 60, every even index from 2 up. But
+        indices 0 AND 1 are both ratio 128, so the alternation does not begin
+        until index 2. The obvious modulo rule, "even layers are indexed",
+        classifies layer 0 wrongly and produces 31 indexed layers. That still
+        totals 61 and still looks right. The 30 `attn.indexer.weights_proj`
+        tensors in the index are what falsify it.
+    - claim: the KV rate splits into a fixed part and a growing part
+      detail: >
+        Per sequence, 61 x 128 x 512 = 3,997,696 elements are FIXED, the
+        sliding window, and never grow with context. The growing part is 4,924
+        elements per token of context: 30 layers contribute 512/4 + 128/4 = 160
+        each (latent plus indexer cache) and 31 contribute 512/128 = 4 each. At
+        8,192 context and fp8 that is 4.00 MB fixed and 40.34 MB growing.
+        Counting the window per-token inflates the rate about 33x and caps
+        concurrency far below what the hardware allows.
+    - claim: gate.tid2eid is stored int64 although model.py declares int32
+      detail: >
+        Derived from a residual, not assumed. With int32 the weight prediction
+        lands 9,308,160 B short of total_size, and that number is exactly
+        3 hash layers x 129,280 vocab x 6 experts x 4 B, which is precisely the
+        int32-to-int64 delta on that one tensor. At int64 the total is exact.
+        Costs 6.21 MB per hash layer, 18.6 MB resident.
+    - claim: attn.wo_a is FP8 in the checkpoint but BF16 at runtime
+      detail: >
+        `attn.wo_a.scale` appears on all 61 layers, and only the FP8 and FP4
+        branches of model.py's Linear register a scale tensor, so storage is
+        FP8. model.py:462 nonetheless constructs it dtype=torch.bfloat16, and
+        the comment at model.py:539 states it: "wo_a is FP8 in checkpoint;
+        could do FP8 einsum here for better perf, but using BF16 for
+        simplicity." Vendor-stated, not inferred.
+    - claim: the routed experts compute at bf16 rate on SM90, not fp8
+      detail: >
+        Read from vLLM source at v0.29.0, one class at a time. The DeepSeek-V4
+        backend priority in fused_moe/oracle/mxfp4.py is
+        FLASHINFER_TRTLLM_MXFP4_MXFP8, DEEPGEMM_MXFP4, MARLIN, BATCHED_MARLIN.
+        TrtLlmMxfp4ExpertsBase._supports_current_device returns
+        `p.is_cuda() and p.is_device_capability_family(100) and
+        has_flashinfer()`. DeepGemmFP4Experts gates on
+        is_device_capability_family(100) or (120). MarlinExpertsBase gates on
+        `p.is_cuda() and p.has_device_capability((7, 5))`. Hopper is capability
+        9.0, so it fails both Blackwell family checks and passes Marlin's floor.
+        That the activations are 16-bit is also source, not naming convention:
+        marlin_moe.py asserts hidden_states.dtype in [float16, bfloat16]. This
+        is the single most load-bearing engine fact in the spec, because it
+        halves the peak the largest term in the step is priced against.
+
+    - claim: the routed experts are MXFP4, not NVFP4
+      detail: >
+        Independent of the `expert_dtype: fp4` label. model.py stores expert
+        weights as float4_e2m1fn_x2 [out, in//2] with a float8_e8m0fnu scale
+        [out, in//32]. e2m1 values with one e8m0 scale per 32 elements along K
+        is the OCP MX format by definition. This matters because vLLM routes
+        MXFP4 and NVFP4 through different backend selection code.
+    - claim: FP4 expert storage is forced by the published size, not merely labelled
+      detail: >
+        Expert params are 61 x 384 x 3 x (7168 x 3072) = 1.5474 T, about 95% of
+        the model. At 1 B/param that is 1,547.4 GB, which exceeds the whole
+        checkpoint's total_size of 864.70 GB on the expert bank alone. Only the
+        0.5 B/param reading is consistent. The config field agrees, but the
+        arithmetic is what establishes it.
+    - claim: hc_split_sinkhorn is one kernel, not twenty
+      detail: >
+        kernel.py's hc_split_sinkhorn_kernel runs the iterations as
+        T.serial(sinkhorn_iters - 1) over a hc x hc register fragment inside a
+        single TileLang launch, gridded over tokens. So mHC costs 2 launches per
+        layer, not 40, and the 2,440-op figure a naive reading produces is wrong
+        by a factor of 20.
+
+  estimated:
+    - field: collectives_per_decode_step = 154
+      value: 154
+      detail: >
+        Counted from dist.all_reduce and dist.all_gather call sites in
+        model.py, which is the checkpoint's reference implementation and not
+        what vLLM runs. vLLM's own module may fuse or reorder them. The MTP
+        block is excluded because speculation is disabled at the baseline, so
+        it is resident but never executes; including it gives 156 and bills a
+        block that does not run. Falsifiable by counting NCCL kernels per step
+        in a trace.
+    - field: indexer_kv_dtype = bf16
+      value: bf16
+      detail: >
+        Indexer.kv_cache is registered with torch.zeros at the ambient default
+        dtype rather than at the quantized dtype, and the recipe's
+        --kv-cache-dtype flag addresses the paged KV cache, not this auxiliary
+        buffer. Worth 0.50 GB per rank per step of read traffic at the
+        baseline, so an fp8 indexer cache would halve the third-largest KV
+        term. Resolve from vLLM's allocator, not from the checkpoint.
+
+  open:
+    - question: does vLLM dequantize the MXFP4 expert bank at load or per operation
+      detail: >
+        Marlin W4A16 unpacks in-kernel, which keeps memory traffic at the FP4
+        rate and is what this spec assumes. The alternative, a load-time
+        dequantization to bf16 or block-fp8, would change the RESIDENT
+        footprint rather than the compute label and would break the fit
+        entirely: FP8 experts add 92.17 GB/GPU, taking weights alone to 206.71
+        GB against 141 GB on an H200. VLLM_DSV4_FP4_DEQUANT=1 does exactly this
+        conversion, but it lives in an open unmerged PR and is absent from
+        v0.29.0. Resolve from the engine's startup memory profile.
+    - question: is the KV cache fp8 or bf16
+      detail: >
+        config.json declares bfloat16 and quantization_config does not cover
+        the cache, so bf16 is what the checkpoint supports, and model.py
+        allocates bf16 with the comment "kv could also use fp8 format, though
+        current implementation uses bf16". The vendor recipe passes
+        --kv-cache-dtype fp8. This spec takes fp8 because the recipe is the
+        deployment, but it is a SERVING decision. bf16 doubles the KV term from
+        1.42 to 2.84 GB per rank.
+    - question: TP-only, or expert parallelism on top
+      detail: >
+        --enable-expert-parallel is absent from the vendor recipe, so this spec
+        models TP8 with whole-expert ownership inside the TP group. Adding EP
+        replaces the MoE all_reduce with an all-to-all and makes ep_imbalance
+        load-bearing, and that figure is calibrated from a trace rather than
+        predicted.
+    - question: expert load imbalance
+      detail: >
+        The 18.9 experts touched per rank per layer assumes uniform routing:
+        384 x (1 - (1 - 1/384)^192) / 8. Real routing is not uniform, and
+        imbalance makes the MoE all_reduce wait on the slowest rank. This is
+        the one quantity in this spec that genuinely cannot be derived from the
+        checkpoint, because it depends on what the tokens are. It needs a
+        trace. The three hash layers are the exception: their routing is a pure
+        function of token id and could be computed exactly given the inputs.
+
+  unmodelled:
+    - Prefill. The compressor's start_pos == 0 branch is a different code path
+      from the decode branch, with overlapping-window pooling across the whole
+      prompt, and the indexer's top-k selection is masked causally rather than
+      taken over a completed cache. None of this spec's decode rates apply.
+    - The MTP block's execution. It is enumerated in the weight total because it
+      is resident at 1.92 GB/GPU, but with speculation disabled it contributes
+      no kernels and no collectives. Enabling it adds one full block plus
+      e_proj, h_proj and three norms to the graph.
+    - The encoding/ tokenizer path. This release ships no Jinja chat template
+      and uses encoding_dsv4.py instead, which runs on the host and never
+      enters the decode graph.
+    - Activation workspace and communication buffers. Both are engine
+      allocations, not checkpoint facts, and the fit analysis marks them as
+      assumed rather than deriving them here.

@@ -354,7 +354,7 @@
     <p class="eyebrow">GitM Execution-Graph Case · Working Status</p>
     <h1>DeepSeek-V4-Pro, one decode step</h1>
     <p class="standfirst">
-      Predicting how a 1.6 trillion-parameter checkpoint executes a single decode step —
+      Predicting how a 1.6 trillion-parameter checkpoint executes a single decode step,
       derived entirely from its own files, before it is ever run.
     </p>
     <dl class="meta">
@@ -379,8 +379,12 @@
         <dd>8 × H200 SXM · NVLink · TP8</dd>
       </div>
       <div>
+        <dt>Engine</dt>
+        <dd>vLLM v0.29.0</dd>
+      </div>
+      <div>
         <dt>Status</dt>
-        <dd>Phases 1–2 complete</dd>
+        <dd>Phases 1 to 4 complete</dd>
       </div>
     </dl>
   </header>
@@ -407,7 +411,7 @@
       </table>
     </div>
     <p class="recon-note">
-      Not “within 2%” — <strong>zero</strong>, on both bytes and tensor count. Every projection
+      Not “within 2%”. <strong>Zero</strong>, on both bytes and tensor count. Every projection
       dimension, per-layer-kind rate, and expert bank size is confirmed correct. The case names
       shapes as where most submissions fail; this closes that door.
     </p>
@@ -424,20 +428,20 @@
       <div class="phase-name">Memory fit</div>
       <span class="chip derived">Complete</span>
     </div>
-    <div class="phase" data-state="next">
+    <div class="phase" data-state="done">
       <div class="phase-n">PHASE 3</div>
       <div class="phase-name">Engine</div>
-      <span class="chip open">Next</span>
+      <span class="chip derived">Complete</span>
     </div>
-    <div class="phase">
+    <div class="phase" data-state="done">
       <div class="phase-n">PHASE 4</div>
       <div class="phase-name">Bounds</div>
-      <span class="chip pending">Pending</span>
+      <span class="chip derived">Complete</span>
     </div>
-    <div class="phase">
+    <div class="phase" data-state="next">
       <div class="phase-n">PHASE 5</div>
       <div class="phase-name">Deliverables</div>
-      <span class="chip pending">Pending</span>
+      <span class="chip open">D2 drafted</span>
     </div>
   </div>
 
@@ -445,7 +449,7 @@
   <section>
     <h2>Structure</h2>
     <p class="lede">
-      Three layer schedules that do not tile — exactly the kind the planner schema insists be
+      Three layer schedules that do not tile. Exactly the kind the planner schema insists be
       written out rather than expressed as a repeating pattern.
     </p>
 
@@ -468,24 +472,24 @@
           <tr>
             <td class="m">gate.tid2eid</td>
             <td class="n">3</td>
-            <td>Hash routing by token ID — layers 0–2, no learned gate</td>
+            <td>Hash routing by token ID, layers 0 to 2, no learned gate</td>
           </tr>
           <tr>
             <td class="m">gate.bias</td>
             <td class="n">58</td>
-            <td>Learned routing — the remaining layers</td>
+            <td>Learned routing, the remaining layers</td>
           </tr>
           <tr>
             <td class="m">mtp.0</td>
             <td class="n">1</td>
-            <td>Draft block, ratio 0 — resident but outside the decode graph</td>
+            <td>Draft block, ratio 0, resident but outside the decode graph</td>
           </tr>
         </tbody>
       </table>
     </div>
 
     <p>
-      <code>compress_ratios</code> has <strong>62</strong> entries, not 61 — it is
+      <code>compress_ratios</code> has <strong>62</strong> entries, not 61. It is
       <code>n_layers + n_mtp_layers</code>, which resolves what first read as an off-by-one. The
       single <code>0</code> at index 61 is the MTP block, so all 61 backbone layers carry a
       compressor and exactly 30 carry an indexer. Both figures match the tensor census exactly.
@@ -493,8 +497,8 @@
     <p>
       Attention is MLA-style: <code>num_key_value_heads: 1</code>, <code>head_dim: 512</code>,
       with LoRA on <em>both</em> the query and the output projection
-      (<code>wo_a</code> → <code>wo_b</code>, <code>o_groups: 16</code>). Residuals are mHC —
-      Manifold-Constrained Hyper-Connections — where <code>hc_split_sinkhorn</code> runs
+      (<code>wo_a</code> → <code>wo_b</code>, <code>o_groups: 16</code>). Residuals are mHC,
+      Manifold-Constrained Hyper-Connections, where <code>hc_split_sinkhorn</code> runs
       <strong>20 iterations at two sites per layer</strong>.
     </p>
   </section>
@@ -510,12 +514,12 @@
         </thead>
         <tbody>
           <tr>
-            <td>Weights — replicated on every rank</td>
+            <td>Weights, replicated on every rank</td>
             <td class="n">7.38</td>
             <td><span class="chip derived">Derived</span></td>
           </tr>
           <tr>
-            <td>Weights — sharded (857.33 ÷ 8)</td>
+            <td>Weights, sharded (857.33 ÷ 8)</td>
             <td class="n">107.17</td>
             <td><span class="chip derived">Derived</span></td>
           </tr>
@@ -540,11 +544,11 @@
 
     <h3>Per-GPU weights are not <code>total / 8</code></h3>
     <p>
-      <code>model.py</code> uses plain <code>Linear</code> — replicated — for <code>wq_a</code>,
+      <code>model.py</code> uses plain <code>Linear</code>, which is replicated, for <code>wq_a</code>,
       <code>wkv</code>, both compressors, and most expensively <code>shared_experts</code>
       (4.10 GB/GPU on its own). Only the parallel classes and the routed expert bank actually
       shard. The naive division gives 108.09 GB and understates the real figure by
-      <strong>6.46 GB</strong> — a plausible-looking number that is wrong in the direction that
+      <strong>6.46 GB</strong>. A plausible-looking number that is wrong in the direction that
       matters.
     </p>
 
@@ -561,8 +565,8 @@
           <tr><th>KV term at 8,192 context</th><th style="text-align:right">fp8</th><th>Behaviour</th></tr>
         </thead>
         <tbody>
-          <tr><td>Fixed — sliding window</td><td class="n">4.00 MB/seq</td><td>O(1) in context — never grows</td></tr>
-          <tr><td>Growing — compressed</td><td class="n">40.34 MB/seq</td><td>Scales with context</td></tr>
+          <tr><td>Fixed, sliding window</td><td class="n">4.00 MB/seq</td><td>O(1) in context, never grows</td></tr>
+          <tr><td>Growing, compressed</td><td class="n">40.34 MB/seq</td><td>Scales with context</td></tr>
           <tr class="sum"><td>Per sequence · × 32, per rank</td><td class="n">44.34 MB · 1.42 GB</td><td></td></tr>
         </tbody>
       </table>
@@ -570,13 +574,13 @@
 
     <p>
       Uncompressed MLA at the same context would be 256 MB/seq, so the compressor buys
-      <strong>≈ 5.8×</strong>. Against 114.54 GB of weights, KV is a rounding error — which
+      <strong>≈ 5.8×</strong>. Against 114.54 GB of weights, KV is a rounding error, which
       already says something about where the bound will land.
     </p>
 
     <h4>The 48 GB most accountings miss</h4>
     <p>
-      FP4 scales are <code>[out, in/32]</code> — full output resolution, unlike FP8's
+      FP4 scales are <code>[out, in/32]</code>, full output resolution, unlike FP8's
       <code>[out/128, in/128]</code> blocks. They therefore cost <strong>1/16</strong> of expert
       weight bytes, not 1/16384: the expert bank is 773.71 GB of weights plus
       <strong>48.36 GB of scale metadata</strong>.
@@ -591,7 +595,7 @@
       configuration you would actually deploy to be distinguished.
     </p>
 
-<pre class="verdict">capacity LOWER BOUND     116.56 GB / 141 GB raw    FITS — 82.7% of capacity</pre>
+<pre class="verdict">capacity LOWER BOUND     116.56 GB / 141 GB raw    FITS, 82.7% of capacity</pre>
 <pre class="caution">deployable @ util 0.9    128.56 GB / 126.90 GB     −1.66 GB</pre>
 
     <div class="callout">
@@ -604,18 +608,177 @@
       <p>
         What is firm: 116.56 GB/GPU is fully derived, leaving 24.44 GB for workspace,
         communication, reserve, and fragmentation. Whether that suffices is an
-        <strong>engine</strong> question, not a checkpoint question — and saying exactly that is
+        <strong>engine</strong> question, not a checkpoint question. Saying exactly that is
         worth more than a confident verdict with nothing under it.
       </p>
     </div>
 
     <h3>If experts are converted to FP8</h3>
     <p>
-      <code>convert.py --expert-dtype fp8</code> adds <strong>+92.17 GB/GPU</strong> → 220.73
-      GB/GPU. Impossible on one node. The minimal shape is <strong>two nodes at TP16</strong>
-      (≈107 GB/GPU); divisibility holds at 16 for experts, heads, <code>o_groups</code>, and
-      vocabulary. That shape moves <code>wo_b</code>'s all-reduce and the MoE all-reduce onto the
-      inter-node fabric — the two collectives to price separately against NVLink.
+      <code>convert.py --expert-dtype fp8</code> adds <strong>+92.17 GB/GPU</strong>, taking
+      <strong>weights alone</strong> to 206.71 GB against 141 GB. Impossible on one node. The
+      minimal shape is <strong>two nodes at TP16</strong> (≈107 GB/GPU); divisibility holds at 16
+      for experts, heads, <code>o_groups</code>, and vocabulary. That shape moves
+      <code>wo_b</code>'s all-reduce and the MoE all-reduce onto the inter-node fabric.
+    </p>
+    <p>
+      That comparison is drawn against weights alone, with no workspace and no reserve in the
+      total, because the weights overflow on their own. Adding assumed numbers would make a guess
+      load bearing in an argument that does not need one.
+    </p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section>
+    <h2>The predicted decode step</h2>
+    <p class="lede">
+      Per rank, per step, at the baseline. Every figure reproduces with
+      <code>python3 derive/bounds.py</code>.
+    </p>
+
+    <div class="tw">
+      <table class="data">
+        <thead>
+          <tr><th>Rank</th><th>Term</th><th style="text-align:right">Time</th><th>Bound by</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="n">1</td><td>Expert weight streaming, routed plus shared</td><td class="n">9.27 ms</td><td><span class="chip derived">Memory</span></td></tr>
+          <tr><td class="n">2</td><td>Launch and dispatch, ~4,326 kernels under graph capture</td><td class="n">2.16 ms</td><td><span class="chip assumed">Latency</span></td></tr>
+          <tr><td class="n">3</td><td>Other HBM: attention weights, KV, head</td><td class="n">1.41 ms</td><td><span class="chip derived">Memory</span></td></tr>
+          <tr><td class="n"></td><td>Compute, all precisions</td><td class="n">0.77 ms</td><td><span class="chip pending">Compute</span></td></tr>
+          <tr><td class="n"></td><td>Collectives, bandwidth only</td><td class="n">0.25 ms</td><td><span class="chip pending">Comm</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>
+      Total HBM traffic is <strong>51.26 GB</strong> per rank per step, of which routed experts are
+      79%. Arithmetic intensity is <strong>15.03 FLOP per byte against a BF16 ridge of 206</strong>,
+      so the step is memory bound by a factor of 14. That is not a close call.
+    </p>
+
+<pre class="verdict">step floor      13.09 ms   →  about 2,444 tok/s aggregate at batch 32
+PR #53709       measured      1,642 to 1,856 tok/s on real Hopper
+floor / measured             1.40x   (above is correct; below would be an error)</pre>
+
+    <p>
+      This is the first derived number that can be checked against something measured, and it lands
+      in the right place. A roofline floor assumes perfect overlap and vendor peak, so it must sit
+      above a real measurement. The 1.4x gap is where imperfect overlap, real bandwidth efficiency,
+      and routing imbalance live.
+    </p>
+
+    <h4>The FP32 row worth a second look</h4>
+    <p>
+      FP32 is 2% of the FLOPs but <strong>31% of the compute time</strong>, because the router and
+      the mHC mixing run on CUDA cores at 67 TFLOP/s rather than on tensor cores. It does not matter
+      at batch 32. It is the row that would matter first if batch grew.
+    </p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section>
+    <h2>Why the experts compute at BF16</h2>
+    <p class="lede">
+      The engine question that could have reordered everything, now resolved.
+    </p>
+    <p>
+      The routed experts are stored in <strong>MXFP4</strong>, the OCP MX format. That was confirmed
+      independently from the checkpoint's own shapes: <code>[out, in//2]</code> in
+      <code>float4_e2m1fn_x2</code> with a scale of <code>[out, in//32]</code> in
+      <code>float8_e8m0fnu</code> is exactly e2m1 values with one e8m0 scale per 32 elements.
+    </p>
+    <p>
+      H200 is SM90 and has no native FP4 tensor path, so the question is what vLLM does instead.
+      The DeepSeek-V4 backend priority is <code>FLASHINFER_TRTLLM_MXFP4_MXFP8</code>, then
+      <code>DEEPGEMM_MXFP4</code>, then <code>MARLIN</code>. The first two are Blackwell gated, so
+      Hopper falls through to Marlin W4A16, which unpacks FP4 inside the kernel and multiplies in
+      BF16.
+    </p>
+
+    <div class="callout">
+      <div class="hd">Storage precision is not compute precision</div>
+      <p>
+        Experts are <strong>stored at FP4 but computed at the BF16 rate of 989.5 TFLOP/s</strong>,
+        not FP8's 1,979. Memory traffic stays at the FP4 rate. Only the math is slower. This is the
+        third place in this model where the two diverge, and the one that matters most.
+      </p>
+    </div>
+
+    <p>
+      The FP8 escape hatch is closed twice over. The vLLM flag that would convert MXFP4 to block FP8
+      at load time lives in an <strong>open, unmerged PR</strong>, so it does not exist in v0.29.0.
+      And it would add 92.17 GB per GPU, which does not fit.
+    </p>
+    <p>
+      One number from that PR validates the whole approach: converting to FP8 speeds up concurrent
+      prefill by <strong>2.04x</strong> but decode by only <strong>1.13x</strong>. That gap is
+      exactly what memory bound decode predicts, since doubling the bytes you read while speeding up
+      the math roughly cancels out.
+    </p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section>
+    <h2>The three experiments</h2>
+    <p class="lede">
+      Each varies one engine knob and records one number the engine already reports. No profiler,
+      no trace, no code change.
+    </p>
+
+    <div class="tw">
+      <table class="data">
+        <thead>
+          <tr><th>Hypothesis</th><th>Vary</th><th>Predicted</th><th>Rejected if</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>E1</strong> expert streaming dominates</td>
+            <td class="m">batch 1 → 64</td>
+            <td>2.6x step time for 32x batch</td>
+            <td>within 1.3x, or above 8x</td>
+          </tr>
+          <tr>
+            <td><strong>E2</strong> launch is rank 2</td>
+            <td class="m">graph on / off</td>
+            <td>2.5x ratio</td>
+            <td>below 1.3x, or above 4x</td>
+          </tr>
+          <tr>
+            <td><strong>E3</strong> non-expert traffic is dense weights, not KV</td>
+            <td class="m">ctx 2k → 32k</td>
+            <td>flat within 5%</td>
+            <td>grows more than 15%</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h4>E3 is the sharpest claim in the note</h4>
+    <p>
+      On the 30 ratio-4 layers the indexer selects <code>index_topk</code>, which is 1,024
+      positions. Once context passes 4,096 there are more than 1,024 compressed slots, so
+      <strong>the attention gather stops growing entirely</strong>. It is capped by
+      <code>index_topk</code>, not by context. Only the ratio-128 layers and the indexer's own scan
+      still scale, so quadrupling context from 8k to 32k adds under 3% to the step.
+    </p>
+    <p>
+      Each experiment also states what it cannot establish. E1 cannot separate bandwidth saturation
+      from expert load imbalance, because both bend the curve the same way, and imbalance depends on
+      what the tokens are.
+    </p>
+
+    <h4>Where communication sits, argued rather than assumed</h4>
+    <p>
+      On bandwidth it is trivial: 224.93 MB at 900 GB/s is 0.25 ms, under 2% of the step. On latency
+      it may not be. There are 154 separate collectives, and a small-message all-reduce over NVLink
+      has a floor around 5 to 10 microseconds regardless of payload. At 7 that is 1.08 ms, which
+      would put it at rank 3.
+    </p>
+    <p>
+      So the honest answer is a <strong>range, 0.25 to 1.3 ms</strong>: fourth or fifth on bandwidth,
+      third at worst, and never first, because rank 1 is 9.27 ms. Under the two-node TP16 shape it
+      could plausibly lead, and that shape is not yet priced.
     </p>
   </section>
 
@@ -623,7 +786,7 @@
   <section>
     <h2>Collectives in the decode graph</h2>
     <p>
-      Read from <code>model.py</code> rather than assumed from TP convention — which would
+      Read from <code>model.py</code> rather than assumed from TP convention, which would
       predict 124 and miss the indexer entirely.
     </p>
 
@@ -634,20 +797,25 @@
         </thead>
         <tbody>
           <tr>
-            <td><code>wo_b</code> all-reduce — <strong>in fp32</strong>, so 4 B/element on the wire</td>
-            <td>every block</td><td class="n">62</td>
+            <td><code>wo_b</code> all-reduce <strong>in fp32</strong>, so 4 B/element on the wire</td>
+            <td>every block that runs</td><td class="n">61</td>
           </tr>
-          <tr><td><code>MoE</code> all-reduce over the fp32 accumulator</td><td>every block</td><td class="n">62</td></tr>
+          <tr><td><code>MoE</code> all-reduce over the fp32 accumulator</td><td>every block that runs</td><td class="n">61</td></tr>
           <tr><td><code>Indexer</code> all-reduce on <code>index_score</code></td><td>ratio-4 layers only</td><td class="n">30</td></tr>
           <tr><td><code>ParallelEmbedding</code> all-reduce</td><td>input</td><td class="n">1</td></tr>
           <tr><td><code>ParallelHead</code> all-gather of logits</td><td>output</td><td class="n">1</td></tr>
-          <tr class="sum"><td>Per decode step</td><td></td><td class="n">≈156</td></tr>
+          <tr class="sum"><td>Per decode step</td><td></td><td class="n">154</td></tr>
         </tbody>
       </table>
     </div>
     <p>
       The <code>y = y.float()</code> before <code>RowParallelLinear</code>'s all-reduce is easy to
       read past and doubles the wire cost of the single most frequent collective in the graph.
+    </p>
+    <p>
+      The count is 61 blocks and not 62. Speculation is disabled, so the MTP block sits in memory
+      and never runs. It costs 1.92 GB per GPU of residency and contributes nothing to the graph.
+      Counting it gives 156 and bills a block that does not execute.
     </p>
   </section>
 
@@ -661,7 +829,7 @@
 
     <h4>1 · <code>gate.tid2eid</code> is stored int64; <code>model.py</code> declares int32</h4>
     <p>
-      Derived, not assumed. At int32 the prediction fell exactly 9,308,160 B short — precisely
+      Derived, not assumed. At int32 the prediction fell exactly 9,308,160 B short, precisely
       <code>3 hash layers × 129,280 × 6 × 4 B</code>, the int32→int64 delta on that one tensor.
       At int64 the reconciliation is exact.
     </p>
@@ -669,7 +837,7 @@
     <h4>2 · <code>wo_a</code> is FP8 in the checkpoint, loaded BF16 by the reference code</h4>
     <p>
       The <code>Linear</code> is constructed <code>dtype=torch.bfloat16</code>, yet
-      <code>attn.wo_a.scale</code> appears 61 times in the index — only FP8 and FP4 linears
+      <code>attn.wo_a.scale</code> appears 61 times in the index, and only FP8 and FP4 linears
       register scales. The vendor's own comment at <code>model.py:539</code> confirms it. Storage
       precision ≠ runtime precision, stated by the vendor rather than inferred.
     </p>
@@ -678,7 +846,7 @@
     <p>
       No <code>auto_map</code>, no <code>modeling_*.py</code>. The <code>inference/</code> folder
       is a standalone reference implementation requiring <code>convert.py</code> and
-      <code>torchrun</code> — not an HF integration. vLLM runs its own in-tree implementation, so
+      <code>torchrun</code>, not an HF integration. vLLM runs its own in-tree implementation, so
       bound analysis must cite <em>that</em>, never <code>inference/model.py</code>.
     </p>
   </section>
@@ -689,69 +857,60 @@
     <p>
       A vendor recipe exists at <code>recipes.vllm.ai/deepseek-ai/DeepSeek-V4-Pro</code>, and the
       assignment says a published recipe supersedes the 8×H200 default. But the recipe targets
-      <strong>8 × AMD MI355X at 288 GB each</strong> — where the fit question becomes arithmetic
+      <strong>8 × AMD MI355X at 288 GB each</strong>, where the fit question becomes arithmetic
       with no tension in it.
     </p>
     <p>
       <strong>Decision:</strong> price the assigned H200s and treat the divergence as a finding.
       The brief states the fit section carries the weight for V4-Pro, and that is only true at
       141 GB. Choosing MI355X would satisfy the instruction's letter while deleting the section
-      that carries the marks. The recipe's hardware-independent settings —
-      <code>--kv-cache-dtype fp8</code>, <code>--gpu-memory-utilization 0.9</code> — are adopted
+      that carries the marks. The recipe's hardware-independent settings,
+      <code>--kv-cache-dtype fp8</code> and <code>--gpu-memory-utilization 0.9</code>, are adopted
       and cited.
     </p>
   </section>
 
   <!-- ============================================================ -->
   <section>
-    <h2>Where this is going</h2>
+    <h2>What remains</h2>
 
-    <h3>Phase 3 — Engine assumptions</h3>
+    <h3>D1, the planner-schema YAML</h3>
     <p>
-      Pin an exact vLLM tag (the recipe requires 0.20.0+) and read source for what the checkpoint
-      cannot determine: which operations fuse, what runs under CUDA graphs, the attention backend,
-      the NCCL collective implementation, and where runtime precision departs from storage.
-      Every item tagged <em>read from source</em>, <em>read from docs</em>, or <em>assumed</em>.
-      Two answers already come free from the recipe rather than assumption:
-      <code>cudagraph_mode: FULL_DECODE_ONLY</code> and <code>--kv-cache-dtype fp8</code>.
+      Not started. Follows <code>gitm/planner/models/mimo-v2.5.yaml</code>: layer schedules written
+      out where they do not tile, per-op precision noted, checkpoint names kept verbatim, and family
+      contradictions captured in comments rather than smoothed away.
     </p>
 
-    <div class="callout">
-      <div class="hd">The question that could reorder everything</div>
-      <p>
-        H200 is SM90 and has <strong>no native FP4 tensor path</strong> — that arrives with
-        Blackwell. If vLLM dequantizes the FP4 expert bank at load time, every memory figure above
-        is wrong. If it dequantizes per operation at runtime, the bound label changes instead.
-        This is the sharpest unresolved item in the case.
-      </p>
-    </div>
-
-    <h3>Phase 4 — Bound hypotheses</h3>
+    <h3>Trim D2</h3>
     <p>
-      Roofline ridges for each precision present on H200 — FP8 1,979 TFLOP/s dense, BF16 989.5,
-      FP32 67, HBM3e 4.8 TB/s, NVLink 900 GB/s — then the three largest time consumers ranked and
-      labelled compute-, memory-, or communication-bound. Each gets one controlled experiment with
-      an explicit rejection threshold, and a statement of what that experiment
-      <em>cannot</em> establish.
-    </p>
-    <p>
-      Communication has to be <em>defended into</em> its rank rather than assumed to lead or
-      trail. The fp32 all-reduce and the indexer's extra 30 collectives both push against the
-      usual intuition.
+      The design note runs about 5,100 words against a one-to-two page ask. The case says match the
+      reference note's rigor, not its length.
     </p>
 
-    <h3>Phase 5 — Deliverables</h3>
+    <h3>Three things that would change conclusions</h3>
     <ul>
       <li>
-        <strong>D1</strong> — model spec YAML in the planner schema: layer schedules written out
-        where they do not tile, per-op precision noted, checkpoint names kept verbatim, family
-        contradictions captured in comments.
+        <strong>Promote the Marlin claim to read-from-source.</strong> It currently rests on a PR
+        description rather than merged source. If it is wrong, the expert GEMM ridge moves by 2x and
+        hypothesis 1's compute side moves with it.
       </li>
       <li>
-        <strong>D2</strong> — design note, one to two pages, matching the reference note's rigor
-        rather than its length.
+        <strong>Count the kernels.</strong> The 4,326 figure is the softest number in the note and it
+        carries rank 2. One profiler trace replaces the estimate with a count.
+      </li>
+      <li>
+        <strong>Settle whether collectives are latency bound.</strong> Recording NCCL time separately
+        during E1's batch sweep would do it, since payload changes 32x while op count stays fixed.
+        Flat means latency bound, scaling means bandwidth bound.
       </li>
     </ul>
+
+    <h3>The one thing that cannot be derived</h3>
+    <p>
+      Expert load imbalance. The figure of 18.9 experts touched per rank assumes uniform routing, and
+      real routing is not uniform. It depends on what the tokens are, so it needs a trace. Saying so
+      is better than modelling it.
+    </p>
   </section>
 
   <!-- ============================================================ -->
@@ -766,8 +925,8 @@
           <tr><td class="n">1</td><td>H200 vs MI355X</td><td><span class="chip derived">Resolved</span> H200, divergence documented</td></tr>
           <tr><td class="n">2</td><td>KV cache dtype</td><td><span class="chip derived">Resolved</span> engine fact, cited to recipe</td></tr>
           <tr><td class="n">3</td><td>TP8-only or expert parallelism</td><td><span class="chip open">Open</span> changes every collective row</td></tr>
-          <tr><td class="n">4</td><td>FP4 expert handling on SM90</td><td><span class="chip open">Open</span> Phase 3 blocker</td></tr>
-          <tr><td class="n">5</td><td>Exact vLLM tag to pin</td><td><span class="chip open">Open</span></td></tr>
+          <tr><td class="n">4</td><td>FP4 expert handling on SM90</td><td><span class="chip derived">Resolved</span> Marlin W4A16, BF16 math</td></tr>
+          <tr><td class="n">5</td><td>Exact vLLM tag to pin</td><td><span class="chip derived">Resolved</span> v0.29.0</td></tr>
           <tr><td class="n">6</td><td>MTP resident but inactive</td><td><span class="chip assumed">Both halves</span> 1.92 GB/GPU, outside the graph</td></tr>
         </tbody>
       </table>
@@ -777,10 +936,12 @@
   <!-- ============================================================ -->
   <section>
     <h2>Reproduce</h2>
-<pre>python3 derive/weights.py    # weight accounting vs published total_size
-python3 derive/fit.py        # per-GPU fit at 8×H200 / TP8</pre>
+<pre>python3 derive/weights.py          # weight accounting vs published total_size
+python3 derive/fit.py              # per-GPU fit at 8xH200 / TP8
+python3 derive/bounds.py           # per-step cost model and the ranking
+python3 tests/test_derivations.py  # 30 checks, no dependencies</pre>
     <p>
-      Neither requires a GPU, network access, or the weights themselves — only the metadata in
+      Neither requires a GPU, network access, or the weights themselves. They read only the metadata in
       <code>context/checkpoint/</code>.
     </p>
   </section>
@@ -788,9 +949,9 @@ python3 derive/fit.py        # per-GPU fit at 8×H200 / TP8</pre>
   <footer>
     <p>
       Two evidence classes are kept separate throughout, because the case is explicit that
-      conflating them is the failure mode: <strong>what the checkpoint establishes</strong> —
-      shapes, counts, storage precision, layer schedules — versus <strong>what depends on the
-      engine</strong> — fusion, launch behaviour, collective implementation, runtime precision.
+      conflating them is the failure mode: <strong>what the checkpoint establishes</strong>
+      (shapes, counts, storage precision, layer schedules) versus <strong>what depends on the
+      engine</strong> (fusion, launch behaviour, collective implementation, runtime precision).
       Every number carries its provenance. Every assumption is labelled rather than smuggled.
     </p>
   </footer>

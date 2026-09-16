@@ -1,7 +1,6 @@
 # DeepSeek-V4-Pro: Predicted Execution of One Decode Step
 
-**Working draft.** Sections 1 and 2 are complete. Section 3 is partial and marked where it needs
-finishing. Section 4 says what I would do next and why.
+**Draft, complete through section 3.** Section 4 says what I would do next and why.
 
 | | |
 |---|---|
@@ -17,8 +16,10 @@ time rather than a target.
 Reproduce the arithmetic:
 
 ```bash
-python3 derive/weights.py    # weight accounting, validated against the index
-python3 derive/fit.py        # per-GPU fit at 8xH200 / TP8
+python3 derive/weights.py        # weight accounting, validated against the index
+python3 derive/fit.py            # per-GPU fit at 8xH200 / TP8
+python3 derive/bounds.py         # per-step cost model and the ranking
+python3 tests/test_derivations.py  # 30 checks on the numbers and the arguments
 ```
 
 ## A note on the hardware
@@ -78,12 +79,21 @@ vLLM picks a MoE backend from a priority list. For DeepSeek-V4 that list is
 `FLASHINFER_TRTLLM_MXFP4_MXFP8`, then `DEEPGEMM_MXFP4`, then `MARLIN`, then `BATCHED_MARLIN`.
 **(source: `vllm/model_executor/layers/fused_moe/oracle/mxfp4.py`)**
 
-The first two are gated to Blackwell, so Hopper falls through to Marlin. **(PR #53709, where the
-author states "on SM90 only Marlin W4A16 passes" alongside Hopper benchmarks. Not yet confirmed
-in merged source. See section 4.)**
+The first two are gated to Blackwell, so Hopper falls through to Marlin. That is now read from
+source rather than inferred, one class at a time: **(source, all at v0.29.0)**
 
-Marlin W4A16 means 4 bit weights and 16 bit activations. It unpacks the FP4 weights inside the
-kernel and does the multiply in BF16. So:
+| Backend | Device check | SM90? |
+|---|---|---|
+| `TrtLlmMxfp4ExpertsBase` | `p.is_cuda() and p.is_device_capability_family(100) and has_flashinfer()` | no |
+| `DeepGemmFP4Experts` | `is_device_capability_family(100)` or `(120)` | no |
+| `MarlinExpertsBase` | `p.is_cuda() and p.has_device_capability((7, 5))` | **yes** |
+
+Hopper is capability 9.0, so it fails both Blackwell family checks and passes Marlin's 7.5 floor.
+Marlin is third in the priority list and the first one that accepts the device.
+
+That the activations are 16 bit is also in source, not inferred from the backend's name:
+`marlin_moe.py` asserts `hidden_states.dtype in [torch.float16, torch.bfloat16]`. The kernel
+unpacks the FP4 weights inside itself and does the multiply in BF16. So:
 
 > **The experts are stored at FP4 but computed at the BF16 rate of 989.5 TFLOP/s, not the FP8
 > rate of 1,979.** Memory traffic stays at the FP4 rate. Only the math is slower.
@@ -104,7 +114,7 @@ The flag does not exist in the pinned release. PR #53709 is open, not merged, so
 is nothing to turn on. **(source)**
 
 And it would not fit anyway. FP8 experts are twice the bytes of MXFP4, which adds 92.17 GB per
-GPU and brings the total to 220.73 GB against 141 GB of capacity. Section 2 covers this.
+GPU and takes weights alone to 206.71 GB against 141 GB of capacity. Section 2.6 covers this.
 
 There is a useful signal buried in that PR's benchmarks. Converting to FP8 speeds up concurrent
 prefill by 2.04x but speeds up decode by only 1.13x. That gap is exactly what you would expect if
@@ -117,9 +127,9 @@ The vendor recipe sets `--compilation-config '{"mode": 3, "cudagraph_mode": "FUL
 **(docs)**
 
 So decode runs inside a captured CUDA graph and prefill does not. Launch overhead for the decode
-step is graph replay, which is roughly 2 microseconds, rather than eager launch at roughly 5.
-With around 156 collectives and several hundred kernels per step, the difference between those
-two numbers is real but it is not where the time goes. Section 3 puts a figure on it.
+step becomes device-side dispatch rather than CPU-side launch. With roughly 4,326 kernels per
+step, the difference between those two costs is worth about 19 ms, which makes graph capture the
+single largest engine-level effect on this workload. Section 3 puts numbers on it.
 
 `mode: 3` is a torch.compile level, which means fusion decisions are delegated to the compiler.
 Which specific operations fuse is **assumed** and I have not read the generated graph.
@@ -132,17 +142,23 @@ vLLM's own implementation)**
 
 | Collective | Where | Count per step |
 |---|---|---|
-| `wo_b` all-reduce, in fp32 | every block | 62 |
-| MoE all-reduce over the fp32 accumulator | every block | 62 |
+| `wo_b` all-reduce, in fp32 | every block that runs | 61 |
+| MoE all-reduce over the fp32 accumulator | every block that runs | 61 |
 | Indexer all-reduce on `index_score` | ratio-4 layers only | 30 |
 | Embedding all-reduce | input | 1 |
 | Logits all-gather | output | 1 |
-| | | **about 156** |
+| | | **154** |
 
-Two things here are easy to miss. First, the usual assumption of two all-reduces per layer gives
+Three things here are easy to miss. First, the usual assumption of two all-reduces per layer gives
 124 and misses the indexer's third collective on half the layers. Second, and more expensive,
 `RowParallelLinear.forward` calls `y = y.float()` before the all-reduce. **The most frequent
 collective in the graph moves 4 bytes per element, not 2.**
+
+Third, the count is 61 blocks and not 62. Speculation is disabled at this baseline, so the MTP
+block sits in memory and never runs. It costs 1.92 GB per GPU of residency and contributes
+nothing to the decode graph. Both halves of that need saying, because counting it in the
+collective total bills a block that does not execute, and leaving it out of the memory total
+understates the footprint by 1.92 GB.
 
 Which NCCL algorithm gets used, ring or tree, is **assumed**. I have not read vLLM's collective
 setup.
@@ -291,8 +307,13 @@ Using BF16 KV instead of FP8 adds 1.42 GB, which does not change the shape of th
 
 ## 2.6 If the experts were converted to FP8
 
-Running `convert.py --expert-dtype fp8` doubles the expert bank. That adds 92.17 GB per GPU and
-brings the total to 220.73 GB against 141 GB. It does not fit on one node, and it is not close.
+Running `convert.py --expert-dtype fp8` doubles the expert bank. That adds 92.17 GB per GPU, which
+takes **weights alone** to 206.71 GB against 141 GB of capacity. It does not fit on one node, and
+it is not close.
+
+Worth stating that comparison carefully. I am putting weights against raw capacity, with no
+workspace and no reserve in the total, because the weights overflow on their own. Adding my
+assumed numbers would make a guess load bearing in an argument that does not need one.
 
 The whole checkpoint in that form is about 1,602 GB against 1,128 GB of node capacity, so the
 minimal shape that holds it is **two nodes at TP16**. Replicated weights stay at 7.38 GB per GPU
@@ -310,105 +331,234 @@ flags as unfinished.
 
 # 3. Top three bound hypotheses
 
-**Status: partial.** The ranking below is argued and the first hypothesis has arithmetic behind
-it. The second and third have the right shape but not finished numbers, and none of the three has
-its controlled experiment written out yet. This section is the remaining work.
+Reproduce every figure in this section with `python3 derive/bounds.py`.
 
-## What the arithmetic so far says
+## 3.1 The predicted step, in one table
 
-At the baseline, each token picks 6 of 384 experts, and there are 32 tokens. That is 192 expert
-selections per layer spread across 384 experts. Assuming routing is roughly uniform, the expected
-number of distinct experts touched per layer is:
+Per rank, per decode step, at the baseline. Bytes are HBM traffic, not resident footprint.
 
-```
-384 x (1 - (1 - 1/384)^192)  =  about 151 experts, or about 18.9 of the 48 on each rank
-```
+| Term | GB | share |
+|---|---:|---:|
+| Routed expert weights, selected only | 40.472 | 79.0% |
+| Attention, compressor and indexer weights | 4.686 | 9.1% |
+| Shared expert weights, every token | 4.030 | 7.9% |
+| mHC, router and norms | 0.673 | 1.3% |
+| KV gather for sparse attention | 0.664 | 1.3% |
+| KV scan for the indexer top-k | 0.503 | 1.0% |
+| `lm_head` | 0.232 | 0.5% |
+| **Total** | **51.260** | |
 
-Each expert is three matrices of 7168 x 3072 in MXFP4, which is 33.03 MB of weights plus 2.06 MB
-of scales, so 35.09 MB. Per rank that is about 663 MB per layer, and across 61 layers about
-**40.4 GB streamed per decode step per rank.** That is roughly 42% of the 96.7 GB expert bank
-each rank holds.
+At 4.8 TB/s that is **10.68 ms** of pure memory time.
 
-At 4.8 TB/s of HBM bandwidth, 40.4 GB takes about **8.4 ms**, which works out to roughly 3,800
-tokens per second aggregate at batch 32.
+Compute, split by the precision each operation actually runs at:
 
-That number can be checked against something real. PR #53709 measured 1,642 to 1,856 tokens per
-second for decode at 32 concurrent requests. My prediction sits above the measurement by about
-2x, which is the correct direction for a roofline floor, and the same order of magnitude. A
-roofline floor that came out below a real measurement would mean I had made an error.
+| | GFLOP | peak | time |
+|---|---:|---:|---:|
+| FP8 tensor core, backbone projections | 457.41 | 1,979 TF/s | 0.231 ms |
+| BF16 tensor core, Marlin experts and attention core | 297.14 | 989.5 TF/s | 0.300 ms |
+| FP32 CUDA core, router and mHC | 16.12 | 67 TF/s | 0.241 ms |
+| **Total** | **770.67** | | **0.772 ms** |
 
-## Hypothesis 1: routed expert weight streaming, memory bound
+Arithmetic intensity is **15.03 FLOP per byte** against a BF16 ridge of 206. The step is memory
+bound by a factor of 14, which is not a close call.
 
-This is almost certainly the largest single consumer. Roughly 40.4 GB moves from HBM per rank per
-step, against 1.42 GB of KV cache reads and a much smaller volume of backbone weights. The
-arithmetic intensity is terrible, because each expert matrix is read in full to be multiplied by
-a handful of token rows.
+That FP32 row deserves a second look. It is 2% of the FLOPs and 31% of the compute time, because
+the router and the mHC mixing run on CUDA cores at 67 TF/s rather than on tensor cores. It still
+does not matter at this batch size, but it is the row that would matter first if batch grew.
 
-The Marlin W4A16 finding from section 1 matters here in a specific way. The compute side runs at
-the BF16 rate of 989.5 TFLOP/s rather than the FP8 rate, but since this operation is memory bound
-the slower math mostly does not show up in the total. That is also why the FP8 conversion in
-PR #53709 only bought 1.13x on decode while buying 2.04x on prefill.
+Collectives, at TP8 on NVLink, using ring cost of 2(N-1)/N times payload:
 
-**Still to do:** the exact FLOP count per step, the resulting arithmetic intensity, and where it
-lands relative to the BF16 ridge point of 989.5e12 / 4.8e12 = 206 FLOP per byte.
+| Collective | count | payload | moved |
+|---|---:|---:|---:|
+| `wo_b` all-reduce, fp32 | 61 | 0.918 MB | 97.94 MB |
+| MoE all-reduce, fp32 | 61 | 0.918 MB | 97.94 MB |
+| Indexer all-reduce, fp32 | 30 | 0.262 MB | 13.76 MB |
+| Embedding all-reduce | 1 | 0.459 MB | 0.80 MB |
+| Logits all-gather | 1 | 16.55 MB | 14.48 MB |
+| **Total** | **154** | | **224.93 MB** |
 
-## Hypothesis 2: the collectives, communication bound
+At 900 GB/s that is **0.25 ms** of bandwidth time.
 
-About 156 collectives per step, and the 62 `wo_b` all-reduces carry fp32 rather than bf16, which
-doubles their wire cost. With TP8 on NVLink at 900 GB/s per GPU this should sit well below the
-expert streaming term, but it is not obviously third either, and the case is explicit that
-communication has to be argued into its position rather than assumed.
+Note the count is 154 rather than the 156 you get from 62 blocks. Speculation is disabled, so the
+MTP block is resident in memory but never executes. It contributes zero collectives. Counting it
+would bill a block that does not run.
 
-**Still to do:** the actual byte volume per collective. The `wo_b` all-reduce moves
-batch x hidden in fp32, and the MoE all-reduce moves batch x hidden in fp32 as well. At batch 32
-and hidden 7168 that is small per collective, so the question is whether 156 launches of a small
-collective is a latency problem rather than a bandwidth problem. That distinction decides the
-rank, and I have not done it yet.
+Launches: roughly **4,326 kernels per step**. Under the recipe's `FULL_DECODE_ONLY` graph capture
+at an assumed 0.5 microseconds of device-side dispatch each, that is **2.16 ms**. In eager mode at
+an assumed 5 microseconds of CPU launch each it would be 21.6 ms.
 
-## Hypothesis 3: launch and synchronisation overhead, latency bound
+## 3.2 The ranking
 
-With `FULL_DECODE_ONLY` graph capture, the per-launch cost should be around 2 microseconds rather
-than 5. But this model has an unusually high op count per layer: attention with two LoRA pairs, a
-compressor on every layer, an indexer on 30 of them, and mHC running 20 Sinkhorn iterations at
-two sites per layer. That last one is 2,440 small operations per step that do almost no
-arithmetic.
+| Rank | Term | Time | Bound by |
+|---|---|---:|---|
+| 1 | Expert weight streaming, routed plus shared | 9.27 ms | **memory** |
+| 2 | Kernel launch and dispatch, under graph capture | 2.16 ms | **latency** |
+| 3 | All other HBM traffic: attention weights, KV, head | 1.41 ms | **memory** |
+| | Compute, all precisions | 0.77 ms | compute |
+| | Collectives, bandwidth only | 0.25 ms | communication |
 
-**Still to do:** an actual op count per layer, multiplied out, times the graph replay cost. If
-the mHC Sinkhorn loop is not fused this could be larger than it looks, and it is the kind of thing
-the case is asking about when it says efficient individual kernels can still produce poor
-end-to-end performance.
+Serializing memory, communication and launch gives a step floor of **13.09 ms**, which is about
+**2,444 tokens per second** aggregate at batch 32.
 
-## Controlled experiments
+That number can be checked. PR #53709 measured 1,642 to 1,856 tokens per second for decode at 32
+concurrent requests on Hopper. My floor sits **1.40x above** the measurement. A floor above a
+measurement is the only correct relationship, since a floor assumes perfect overlap and vendor
+peak. A floor that came out below a real measurement would mean I had made an arithmetic error.
+The 1.4x gap is where imperfect overlap, real bandwidth efficiency and routing imbalance live.
 
-**Not yet written.** Each of the three needs: what I hold fixed, what I vary, what I record, the
-threshold or trend that would reject the hypothesis, and what the experiment cannot establish.
-This is the highest value remaining work in the whole submission, because the case says a
-hypothesis without a rejection condition does not count.
+## 3.3 Where communication sits, and why it is not in the top three
+
+The case asks for this to be argued rather than assumed, and the argument has two halves that
+point in different directions.
+
+On **bandwidth**, communication is trivial. 224.93 MB at 900 GB/s is 0.25 ms, under 2% of the
+step. Even with the fp32 cast doubling the wire cost of the two most frequent collectives, the
+payloads are tiny because decode moves 32 tokens, not 8,192.
+
+On **latency**, it might not be trivial at all. There are 154 separate collectives, and a small
+message all-reduce over NVLink has a floor of roughly 5 to 10 microseconds regardless of payload.
+At 7 microseconds that is **1.08 ms**, which would put communication at rank 3 and push the other
+HBM traffic to rank 4.
+
+So the honest statement is a range. Communication costs somewhere between **0.25 ms and about
+1.3 ms** depending on whether per-collective latency dominates payload, and I cannot settle that
+from the checkpoint or from engine source. It is fourth or fifth on bandwidth alone and third at
+worst. It does not lead under any reading, because rank 1 is 9.27 ms and the entire collective
+budget cannot approach that.
+
+One more reason it does not lead: CUDA graph capture amortizes the CPU side of launching these
+collectives, but it does not remove the device side synchronisation between ranks. That is why
+this shows up as a latency question rather than a launch question.
+
+Under the two node TP16 shape from section 2.6 the answer changes completely. The 122 per layer
+all-reduces would cross the inter-node fabric instead of NVLink, at perhaps a quarter of the
+bandwidth and several times the latency. Communication would plausibly become rank 1 or 2 there.
+I have not priced that shape, and section 4 says so.
 
 ---
 
+## Experiment 1, for hypothesis 1: expert weight streaming dominates
+
+**Hold fixed.** Model, revision, engine version, hardware, TP8, context at 8,192 tokens,
+`cudagraph_mode: FULL_DECODE_ONLY`, `--kv-cache-dtype fp8`, speculation disabled.
+
+**Vary.** Batch size across 1, 2, 4, 8, 16, 32, 64.
+
+**Why this discriminates.** The expected number of distinct experts touched per layer is
+`384 x (1 - (1 - 1/384)^(6B))`, which is strongly sublinear in batch. It is about 5.9 experts at
+batch 1, 45 at batch 8, 151 at batch 32, and 243 at batch 64. Routed expert traffic follows that
+curve. Every other term in the step is either flat in batch, like the dense weights and the
+launch overhead, or linear in batch, like the KV gather and the collective payloads. So the three
+candidate worlds produce three different shapes.
+
+**Record.** Median per step latency in milliseconds at each batch size, from the engine's own
+step timing.
+
+**Predicted.** Step latency rises from about 5.0 ms at batch 1 to about 13.1 ms at batch 32. That
+is **2.6x for a 32x increase in batch**, and per token throughput should improve roughly 12x
+across that range before flattening.
+
+**Rejection condition.** If step latency at batch 32 is **within 1.3x** of step latency at batch
+1, expert streaming is not the dominant term and something batch independent is. Equally, if step
+latency grows **more than 8x** across that range, the step is closer to linear in tokens than the
+model predicts and the expert term is not behaving as a shared bulk read.
+
+**What it cannot establish.** It does not prove the bytes are expert weights. Any term that
+follows the same sublinear routing curve would produce the same shape, and confirming the volume
+needs a profiler counter such as `dram__bytes_read.sum`. It also cannot separate bandwidth
+saturation from expert load imbalance, because both make the curve bend the same way. Imbalance
+specifically needs a trace, since it depends on what the tokens are.
+
+## Experiment 2, for hypothesis 2: launch and dispatch is rank 2
+
+**Hold fixed.** Everything in experiment 1, with batch pinned at 32 and context at 8,192.
+
+**Vary.** `cudagraph_mode` between `FULL_DECODE_ONLY` and `NONE`.
+
+**Why this discriminates.** Graph capture removes per kernel CPU launch cost and leaves the
+kernels themselves untouched. The difference between the two runs is therefore almost entirely
+launch overhead, which is the quantity in question.
+
+**Record.** Median per step latency in both modes, and the ratio between them.
+
+**Predicted.** About 13.1 ms captured against about 32.6 ms eager, a ratio of **2.5x**. That
+follows directly from roughly 4,326 kernels at the assumed 0.5 and 5.0 microsecond per kernel
+costs.
+
+**Rejection condition.** If the eager to captured ratio is **below 1.3x**, the kernel count is far
+lower than 4,326 or the per launch cost is far below 5 microseconds, and launch overhead is not
+rank 2. If the ratio exceeds **4x**, my per kernel estimate is too low and launch is a larger
+share of the captured step than 2.16 ms suggests, which would move it toward rank 1.
+
+**What it cannot establish.** It conflates kernel launch with collective launch, since graph
+capture amortizes both and this experiment cannot separate them. It also gives an aggregate cost
+rather than a kernel count, so it cannot confirm the 4,326 figure directly. A profiler kernel
+trace would give the count, and that is the cheaper way to check the softest number in this note.
+
+## Experiment 3, for hypothesis 3: the non-expert traffic is dense weights, not KV
+
+**Hold fixed.** Batch at 32, TP8, engine, graph mode, KV dtype.
+
+**Vary.** Context length across 2,048, 8,192 and 32,768 cached tokens.
+
+**Why this discriminates.** This is the sharpest prediction in the note, and it comes from a
+detail that is easy to miss. On the 30 ratio-4 layers the indexer selects `index_topk` positions,
+which is 1,024. Once context passes 4,096 tokens there are more than 1,024 compressed slots, so
+**the attention gather stops growing entirely.** It is capped by `index_topk`, not by context.
+Only two things still scale with context: the 31 ratio-128 layers, which gather `context/128`
+slots, and the indexer's own scan, which must read `context/4` entries to choose its top-k.
+
+So quadrupling context from 8,192 to 32,768 adds roughly 1.5 GB to a 51.26 GB step. That is under
+3%. If KV traffic were the dominant non-expert term, or if the gather were not actually sparse,
+quadrupling context would move the step substantially.
+
+**Record.** Median per step latency at each context length, plus the reported KV cache block usage
+to confirm the context actually changed.
+
+**Predicted.** Step latency **nearly flat**, within about 5% across a 16x range of context.
+
+**Rejection condition.** If step latency grows by **more than 15%** from 2,048 to 32,768 tokens,
+then either the engine is reading the full KV cache rather than a sparse gather, or the indexer
+scan is more expensive than modeled. Either finding rejects this hypothesis's composition and
+promotes KV traffic in the ranking. A **linear** growth in context would mean the sparse path is
+not being taken at all, which would be the most interesting failure of the three.
+
+**What it cannot establish.** It does not separate the attention weights from the mHC, router and
+norm traffic inside the same bucket, since none of those depend on context. Splitting that bucket
+needs per kernel timing. It also says nothing about prefill, where the gather is genuinely
+quadratic in the windowed layers and this whole analysis does not apply.
+
+## A note on what these three share
+
+All three experiments vary one engine-level knob and record one number that the engine already
+reports. None of them needs a profiler, a trace, or a code change. That is deliberate. The
+cheapest experiment that can reject a hypothesis is worth more than a better instrumented one that
+takes a week to set up, and if all three run as predicted the model in section 3.1 is good enough
+to plan against. If any one of them fails its rejection condition, the ranking in 3.2 is wrong and
+I would rather find that out in an afternoon.
 # 4. What I would do next, and why
 
 Ranked by how much they would change the conclusions.
-
-**Finish section 3.** The three experiments are the part of the case that tests judgment rather
-than arithmetic, and they are missing. Everything else here is scaffolding for them.
-
-**Confirm the Marlin claim in merged source.** Right now "SM90 falls through to Marlin" is read
-from a PR description, not from source. The capability gates live in `is_supported_config` on
-`TrtLlmMxfp4ExpertsMonolithic`, `DeepGemmFP4Experts`, and `MarlinExperts`. Quoting those three
-would move the single most important engine claim in this note from one evidence class to a
-better one. If it turned out wrong, the expert GEMM ridge changes by 2x and hypothesis 1's
-compute side changes with it.
 
 **Settle the workspace number.** The 24.44 GB of headroom is derived but what fills it is
 guessed. vLLM prints its actual KV cache allocation and memory profile at startup. One line of
 that output replaces three assumed numbers and turns section 2.5 from a hedge into a result.
 This is far cheaper than more arithmetic.
 
+**Count the kernels.** The 4,326 figure is the softest number in this note and it carries rank 2
+in the ranking. A single profiler kernel trace replaces the estimate with a count, and experiment
+2 only measures the aggregate cost rather than confirming the count itself.
+
+**Settle whether collectives are latency bound.** Section 3.3 gives communication as a range from
+0.25 ms to about 1.3 ms, and the two ends sit in different positions in the ranking. Recording
+NCCL time separately during the batch sweep in experiment 1 would settle it, since the payload
+changes 32x while the op count stays fixed. Flat means latency bound, scaling means bandwidth
+bound.
+
 **Price the two fabrics separately.** The two-node TP16 shape in section 2.6 is derived, but I
-have not put numbers on what moving 124 collectives per step from NVLink to the inter-node fabric
-actually costs. That is the difference between naming a shape and recommending one.
+have not put numbers on what moving 122 per layer all-reduces from NVLink to the inter-node
+fabric actually costs. That is the difference between naming a shape and recommending one, and it
+is the one place where communication could plausibly become rank 1.
 
 **Check the expert imbalance assumption.** The 18.9 experts per rank figure assumes uniform
 routing. Real routing is not uniform, and imbalance makes the MoE all-reduce wait on the slowest
